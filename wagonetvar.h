@@ -4,6 +4,7 @@
 #include <WiFiUdp.h>
 #include <vector>
 #include <string>
+#include <map>
 
 namespace esphome {
 namespace wagonetvar {
@@ -13,6 +14,7 @@ struct VarDef {
     std::string type;
     size_t size;
     size_t align;
+    std::string raw_value = "0"; // Przechowywana wartość tekstowa/licz osobno
 };
 
 class WagoNetVarComponent : public PollingComponent {
@@ -26,6 +28,10 @@ public:
     void set_alignment(bool align) { alignment_ = align; }
 
     void add_variable(const std::string &name, const std::string &type);
+    
+    // Nowa metoda do aktualizacji wartości danej zmiennej po nazwie
+    void set_variable_value(const std::string &name, float value);
+    void set_variable_value(const std::string &name, bool value);
 
     void setup() override;
     void update() override;
@@ -41,9 +47,11 @@ private:
 
     WiFiUDP udp_;
     std::vector<VarDef> variables_;
+    std::map<std::string, std::string> var_values_; // Przechowywane wartości
     uint16_t sequence_counter_ = 1;
 
     void get_type_info(const std::string &type, size_t &size, size_t &align);
+    std::vector<uint8_t> pack_value(const VarDef &var, const std::string &val_str);
 };
 
 } // namespace wagonetvar
