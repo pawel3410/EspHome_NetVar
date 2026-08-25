@@ -1,4 +1,5 @@
 #include "wagonetvar.h"
+#include <cmath>
 
 namespace esphome {
 namespace wagonetvar {
@@ -8,6 +9,15 @@ void WagoNetVarComponent::add_variable(const std::string &name, const std::strin
     size_t align = 1;
     get_type_info(type, size, align);
     variables_.push_back({name, type, size, align});
+    var_values_[name] = "0";
+}
+
+void WagoNetVarComponent::set_variable_value(const std::string &name, float value) {
+    var_values_[name] = std::to_string(value);
+}
+
+void WagoNetVarComponent::set_variable_value(const std::string &name, bool value) {
+    var_values_[name] = value ? "1" : "0";
 }
 
 void WagoNetVarComponent::get_type_info(const std::string &type, size_t &size, size_t &align) {
@@ -30,6 +40,35 @@ void WagoNetVarComponent::get_type_info(const std::string &type, size_t &size, s
     }
 }
 
+std::vector<uint8_t> WagoNetVarComponent::pack_value(const VarDef &var, const std::string &val_str) {
+    std::vector<uint8_t> bytes;
+    if (var.type == "BOOL") {
+        bool b = (val_str == "1" || val_str == "true" || val_str == "True");
+        bytes.push_back(b ? 1 : 0);
+    } else if (var.type == "REAL") {
+        float f = std::stof(val_str);
+        uint32_t val_u;
+        std::memcpy(&val_u, &f, sizeof(float));
+        for (int i = 0; i < 4; i++) {
+            if (big_endian_) {
+                bytes.push_back((val_u >> (24 - i * 8)) & 0xFF);
+            } else {
+                bytes.push_back((val_u >> (i * 8)) & 0xFF);
+            }
+        }
+    } else {
+        int32_t val_i = std::stoi(val_str);
+        for (size_t i = 0; i < var.size; i++) {
+            if (big_endian_) {
+                bytes.push_back((val_i >> ((var.size - 1 - i) * 8)) & 0xFF);
+            } else {
+                bytes.push_back((val_i >> (i * 8)) & 0xFF);
+            }
+        }
+    }
+    return bytes;
+}
+
 void WagoNetVarComponent::setup() {
     ESP_LOGI("wagonetvar", "Inicjalizacja komponentu WagoNetVar (COB-ID: %d, Checksum: %d)", cob_id_, checksum_);
     udp_.begin(port_);
@@ -41,6 +80,8 @@ void WagoNetVarComponent::update() {
     uint8_t current_bool_byte = 0;
 
     for (const auto &var : variables_) {
+        std::string val_str = var_values_[var.name];
+
         if (var.type != "BOOL" && bool_bit_index > 0) {
             payload.push_back(current_bool_byte);
             bool_bit_index = 0;
@@ -48,7 +89,7 @@ void WagoNetVarComponent::update() {
         }
 
         if (var.type == "BOOL" && pack_bools_) {
-            bool val_bool = false; 
+            bool val_bool = (val_str == "1" || val_str == "true");
             if (val_bool) {
                 current_bool_byte |= (1 << bool_bit_index);
             }
@@ -68,9 +109,8 @@ void WagoNetVarComponent::update() {
                 }
             }
 
-            for (size_t i = 0; i < var.size; i++) {
-                payload.push_back(0x00);
-            }
+            std::vector<uint8_t> packed = pack_value(var, val_str);
+            payload.insert(payload.end(), packed.begin(), packed.end());
         }
     }
 
