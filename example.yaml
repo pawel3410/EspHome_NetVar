@@ -1,0 +1,46 @@
+esphome:
+  name: wago-netvar-esp32
+
+esp32:
+  board: esp32dev
+
+wifi:
+  ssid: "TwojeWiFi"
+  password: "TwojePassword"
+
+external_components:
+  - source: github://pawel3410/EspHome_NetVar
+    components: [ wagonetvar ]
+
+# Konfiguracja magistrali OneWire i czujnika DS18B20
+dallas:
+  - pin: GPIO23
+    id: my_dallas
+
+sensor:
+  - platform: dallas
+    dallas_id: my_dallas
+    address: 0x1234567890AB # Podaj adres swojego czujnika
+    name: "Temperatura DS18B20"
+    id: temp_ds18b20
+    on_value:
+      then:
+        # Gdy tylko odczyta nową temperaturę, przekazujemy ją do naszej zmiennej w NetVars
+        - lambda: |-
+            id(my_wago_netvars).set_variable_value("Temperatura", x);
+
+wago_netvar:
+  id: my_wago_netvars
+  ip: "192.168.17.44"
+  port: 1202
+  cob_id: 124
+  checksum: 6
+  endian: "little"
+  pack_bools: false
+  alignment: false
+  update_interval: 1s
+  variables:
+    - name: "Pompa_CWi"
+      type: "BOOL"
+    - name: "Temperatura"
+      type: "REAL"
