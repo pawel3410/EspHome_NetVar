@@ -1,0 +1,25 @@
+esphome:
+  name: wago-netvar-esp32
+
+esp32:
+  board: esp32dev
+
+wifi:
+  ssid: "TwojeWiFi"
+  password: "TwojePassword"
+
+# Konfiguracja komponentu WagoNetVar
+wago_netvar:
+  ip: "192.168.17.44"
+  port: 1202
+  cob_id: 124
+  checksum: 6
+  endian: "little"
+  pack_bools: false
+  alignment: false
+  update_interval: 1s
+  variables:
+    - name: "Pompa_CWi"
+      type: "BOOL"
+    - name: "Temperatura"
+      type: "REAL"
