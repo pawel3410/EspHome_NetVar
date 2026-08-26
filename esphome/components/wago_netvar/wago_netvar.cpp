@@ -112,11 +112,11 @@ void WagoNetVarComponent::trigger_send_() {
 void WagoNetVarComponent::loop() {
     if (enable_read_) {
         int packet_size = udp_.parsePacket();
-        if (packet_size >= 20) {
+        if (packet_size > 0) {
             std::vector<uint8_t> buffer(packet_size);
-            udp_.read(buffer.data(), packet_size);
+            udp_.read(buffer.data(), packet_size); // Bezpieczne czyszczenie bufora sprzętowego UDP
 
-            if (buffer[0] == 0x00 && buffer[1] == 0x2D && buffer[2] == 0x53 && buffer[3] == 0x33) {
+            if (packet_size >= 20 && buffer[0] == 0x00 && buffer[1] == 0x2D && buffer[2] == 0x53 && buffer[3] == 0x33) {
                 uint16_t pkt_cob_id = read_u16(&buffer[8]);
                 uint16_t pkt_checksum = read_u16(&buffer[12]);
 
@@ -199,25 +199,50 @@ void WagoNetVarComponent::unpack_payload(const uint8_t *payload, size_t len) {
                         switches_[var.name]->publish_state(val);
                     }
                 }
-            } else if (var.type == "REAL") {
-                uint32_t val_u = 0;
-                for (int i = 0; i < 4; i++) {
-                    if (big_endian_) val_u = (val_u << 8) | payload[offset + i];
-                    else val_u |= ((uint32_t)payload[offset + i] << (i * 8));
-                }
-                float f;
-                std::memcpy(&f, &val_u, sizeof(float));
-                var_values_[var.name] = std::to_string(f);
-                ESP_LOGV(TAG, "Odczyt (REAL) <- %s = %s", var.name.c_str(), var_values_[var.name].c_str());
-
-                if (sensors_.count(var.name)) {
-                    if (!sensors_[var.name]->has_state() || std::abs(f - sensors_[var.name]->state) >= 0.001f) {
-                        sensors_[var.name]->publish_state(f);
+            } else if (var.type == "REAL" || var.type == "LREAL") {
+                if (var.type == "REAL") {
+                    uint32_t val_u = 0;
+                    for (int i = 0; i < 4; i++) {
+                        if (big_endian_) val_u = (val_u << 8) | payload[offset + i];
+                        else val_u |= ((uint32_t)payload[offset + i] << (i * 8));
                     }
-                }
-                if (numbers_.count(var.name)) {
-                    if (!numbers_[var.name]->has_state() || std::abs(f - numbers_[var.name]->state) >= 0.001f) {
-                        numbers_[var.name]->publish_state(f);
+                    float f;
+                    std::memcpy(&f, &val_u, sizeof(float));
+                    var_values_[var.name] = std::to_string(f);
+                    ESP_LOGV(TAG, "Odczyt (REAL) <- %s = %s", var.name.c_str(), var_values_[var.name].c_str());
+
+                    if (sensors_.count(var.name)) {
+                        if (!sensors_[var.name]->has_state() || std::abs(f - sensors_[var.name]->state) >= 0.001f) {
+                            sensors_[var.name]->publish_state(f);
+                        }
+                    }
+                    if (numbers_.count(var.name)) {
+                        if (!numbers_[var.name]->has_state() || std::abs(f - numbers_[var.name]->state) >= 0.001f) {
+                            numbers_[var.name]->publish_state(f);
+                        }
+                    }
+                } else {
+                    // LREAL
+                    uint64_t val_u = 0;
+                    for (int i = 0; i < 8; i++) {
+                        if (big_endian_) val_u = (val_u << 8) | payload[offset + i];
+                        else val_u |= ((uint64_t)payload[offset + i] << (i * 8));
+                    }
+                    double d;
+                    std::memcpy(&d, &val_u, sizeof(double));
+                    var_values_[var.name] = std::to_string(d);
+                    ESP_LOGV(TAG, "Odczyt (LREAL) <- %s = %s", var.name.c_str(), var_values_[var.name].c_str());
+
+                    float f_val = static_cast<float>(d); // ESPHome używa float natywnie
+                    if (sensors_.count(var.name)) {
+                        if (!sensors_[var.name]->has_state() || std::abs(f_val - sensors_[var.name]->state) >= 0.001f) {
+                            sensors_[var.name]->publish_state(f_val);
+                        }
+                    }
+                    if (numbers_.count(var.name)) {
+                        if (!numbers_[var.name]->has_state() || std::abs(f_val - numbers_[var.name]->state) >= 0.001f) {
+                            numbers_[var.name]->publish_state(f_val);
+                        }
                     }
                 }
             } else if (var.type.rfind("STRING", 0) == 0) {
@@ -270,6 +295,15 @@ std::vector<uint8_t> WagoNetVarComponent::pack_value(const VarDef &var, const st
             if (big_endian_) bytes.push_back((val_u >> (24 - i * 8)) & 0xFF);
             else bytes.push_back((val_u >> (i * 8)) & 0xFF);
         }
+    } else if (var.type == "LREAL") {
+        char *endptr = nullptr;
+        double d = std::strtod(val_str.c_str(), &endptr);
+        uint64_t val_u;
+        std::memcpy(&val_u, &d, sizeof(double));
+        for (int i = 0; i < 8; i++) {
+            if (big_endian_) bytes.push_back((val_u >> (56 - i * 8)) & 0xFF);
+            else bytes.push_back((val_u >> (i * 8)) & 0xFF);
+        }
     } else if (var.type.rfind("STRING", 0) == 0) {
         for (size_t i = 0; i < var.size; i++) {
             if (i < val_str.length() && i < var.size - 1) {
@@ -299,9 +333,10 @@ std::vector<uint8_t> WagoNetVarComponent::pack_value(const VarDef &var, const st
             val_i = std::clamp(val_i, min_lim, max_lim);
         }
 
+        uint64_t unsigned_val = static_cast<uint64_t>(val_i); // Rzutowanie przed bitshift dla bezpieczeństwa pamięci
         for (size_t i = 0; i < var.size; i++) {
-            if (big_endian_) bytes.push_back((val_i >> ((var.size - 1 - i) * 8)) & 0xFF);
-            else bytes.push_back((val_i >> (i * 8)) & 0xFF);
+            if (big_endian_) bytes.push_back((unsigned_val >> ((var.size - 1 - i) * 8)) & 0xFF);
+            else bytes.push_back((unsigned_val >> (i * 8)) & 0xFF);
         }
     }
     return bytes;
