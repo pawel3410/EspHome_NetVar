@@ -1,6 +1,7 @@
 #include "wago_netvar.h"
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 
 namespace esphome {
 namespace wago_netvar {
@@ -64,46 +65,44 @@ std::vector<uint8_t> WagoNetVarComponent::pack_value(const VarDef &var, const st
         bool b = (val_str == "1" || val_str == "true" || val_str == "True");
         bytes.push_back(b ? 1 : 0);
     } else if (var.type == "REAL") {
-        float f = 0.0f;
-        try { f = std::stof(val_str); } catch (...) {}
+        char *endptr = nullptr;
+        float f = std::strtof(val_str.c_str(), &endptr);
         uint32_t val_u;
         std::memcpy(&val_u, &f, sizeof(float));
         for (int i = 0; i < 4; i++) {
-            if (big_endian_) {
-                bytes.push_back((val_u >> (24 - i * 8)) & 0xFF);
-            } else {
-                bytes.push_back((val_u >> (i * 8)) & 0xFF);
-            }
-        }
-    } else if (var.type == "LREAL") {
-        double d = 0.0;
-        try { d = std::stod(val_str); } catch (...) {}
-        uint64_t val_u;
-        std::memcpy(&val_u, &d, sizeof(double));
-        for (int i = 0; i < 8; i++) {
-            if (big_endian_) {
-                bytes.push_back((val_u >> (56 - i * 8)) & 0xFF);
-            } else {
-                bytes.push_back((val_u >> (i * 8)) & 0xFF);
-            }
+            if (big_endian_) bytes.push_back((val_u >> (24 - i * 8)) & 0xFF);
+            else bytes.push_back((val_u >> (i * 8)) & 0xFF);
         }
     } else if (var.type.rfind("STRING", 0) == 0) {
         for (size_t i = 0; i < var.size; i++) {
-            if (i < val_str.length() && i < var.size - 1) {
-                bytes.push_back(static_cast<uint8_t>(val_str[i]));
-            } else {
-                bytes.push_back(0x00);
-            }
+            if (i < val_str.length() && i < var.size - 1) bytes.push_back(static_cast<uint8_t>(val_str[i]));
+            else bytes.push_back(0x00);
         }
     } else {
-        int64_t val_i = 0;
-        try { val_i = std::stoll(val_str); } catch (...) {}
+        char *endptr = nullptr;
+        int64_t val_i = std::strtoll(val_str.c_str(), &endptr, 10);
+
+        // --- WALIDACJA ZAKRESÓW DANYCH ---
+        int64_t min_lim = 0, max_lim = 0;
+        bool check_range = true;
+
+        if (var.type == "BYTE" || var.type == "USINT") { min_lim = 0; max_lim = 255; }
+        else if (var.type == "SINT") { min_lim = -128; max_lim = 127; }
+        else if (var.type == "WORD" || var.type == "UINT") { min_lim = 0; max_lim = 65535; }
+        else if (var.type == "INT") { min_lim = -32768; max_lim = 32767; }
+        else if (var.type == "DWORD" || var.type == "UDINT") { min_lim = 0; max_lim = 4294967295LL; }
+        else if (var.type == "DINT") { min_lim = -2147483648LL; max_lim = 2147483647LL; }
+        else { check_range = false; }
+
+        if (check_range && (val_i < min_lim || val_i > max_lim)) {
+            ESP_LOGW(TAG, "Zmienna '%s' (%s) przekracza zakres [%lld, %lld]: %lld. Przycięto.",
+                     var.name.c_str(), var.type.c_str(), (long long)min_lim, (long long)max_lim, (long long)val_i);
+            val_i = std::clamp(val_i, min_lim, max_lim);
+        }
+
         for (size_t i = 0; i < var.size; i++) {
-            if (big_endian_) {
-                bytes.push_back((val_i >> ((var.size - 1 - i) * 8)) & 0xFF);
-            } else {
-                bytes.push_back((val_i >> (i * 8)) & 0xFF);
-            }
+            if (big_endian_) bytes.push_back((val_i >> ((var.size - 1 - i) * 8)) & 0xFF);
+            else bytes.push_back((val_i >> (i * 8)) & 0xFF);
         }
     }
     return bytes;
