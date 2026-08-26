@@ -63,6 +63,7 @@ public:
     void register_binary_sensor(const std::string &var_name, binary_sensor::BinarySensor *bs) { binary_sensors_[var_name] = bs; }
 
     void set_variable_value(const std::string &name, float value);
+    void set_variable_value(const std::string &name, int value);
     void set_variable_value(const std::string &name, bool value);
     void set_variable_value(const std::string &name, const std::string &value);
 
