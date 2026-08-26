@@ -61,6 +61,15 @@ void WagoNetVarComponent::set_variable_value(const std::string &name, float valu
     }
 }
 
+void WagoNetVarComponent::set_variable_value(const std::string &name, int value) {
+    std::string new_val = std::to_string(value);
+    if (var_values_[name] != new_val) {
+        var_values_[name] = new_val;
+        is_dirty_ = true;
+        trigger_send_();
+    }
+}
+
 void WagoNetVarComponent::set_variable_value(const std::string &name, bool value) {
     std::string new_val = value ? "1" : "0";
     if (var_values_[name] != new_val) {
@@ -183,7 +192,7 @@ void WagoNetVarComponent::unpack_payload(const uint8_t *payload, size_t len) {
                 std::memcpy(&f, &val_u, sizeof(float));
                 var_values_[var.name] = std::to_string(f);
                 if (sensors_.count(var.name)) {
-                    float cur = sensors_[var.name]->raw_state;
+                    float cur = sensors_[var.name]->get_raw_state();
                     if (std::isnan(cur) || std::abs(f - cur) >= 0.001f) {
                         sensors_[var.name]->publish_state(f);
                     }
@@ -200,7 +209,7 @@ void WagoNetVarComponent::unpack_payload(const uint8_t *payload, size_t len) {
                 var_values_[var.name] = std::to_string(val_i);
                 if (sensors_.count(var.name)) {
                     float f_val = static_cast<float>(val_i);
-                    if (sensors_[var.name]->raw_state != f_val) {
+                    if (sensors_[var.name]->get_raw_state() != f_val) {
                         sensors_[var.name]->publish_state(f_val);
                     }
                 }
