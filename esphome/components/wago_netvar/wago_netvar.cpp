@@ -1,6 +1,6 @@
 #include "wago_netvar.h"
 #include <cmath>
-#include <cstring> // Niezbędne dla std::memcpy
+#include <cstring>
 
 namespace esphome {
 namespace wago_netvar {
@@ -17,8 +17,24 @@ void WagoNetVarComponent::set_variable_value(const std::string &name, float valu
     var_values_[name] = std::to_string(value);
 }
 
+void WagoNetVarComponent::set_variable_value(const std::string &name, double value) {
+    var_values_[name] = std::to_string(value);
+}
+
 void WagoNetVarComponent::set_variable_value(const std::string &name, bool value) {
     var_values_[name] = value ? "1" : "0";
+}
+
+void WagoNetVarComponent::set_variable_value(const std::string &name, int value) {
+    var_values_[name] = std::to_string(value);
+}
+
+void WagoNetVarComponent::set_variable_value(const std::string &name, uint32_t value) {
+    var_values_[name] = std::to_string(value);
+}
+
+void WagoNetVarComponent::set_variable_value(const std::string &name, const std::string &value) {
+    var_values_[name] = value;
 }
 
 void WagoNetVarComponent::get_type_info(const std::string &type, size_t &size, size_t &align) {
@@ -32,7 +48,7 @@ void WagoNetVarComponent::get_type_info(const std::string &type, size_t &size, s
         size_t start = type.find('(');
         size_t end = type.find(')');
         if (start != std::string::npos && end != std::string::npos) {
-            int len = stoi(type.substr(start + 1, end - start - 1));
+            int len = std::stoi(type.substr(start + 1, end - start - 1));
             size = len + 1;
         } else {
             size = 81;
@@ -43,11 +59,13 @@ void WagoNetVarComponent::get_type_info(const std::string &type, size_t &size, s
 
 std::vector<uint8_t> WagoNetVarComponent::pack_value(const VarDef &var, const std::string &val_str) {
     std::vector<uint8_t> bytes;
+
     if (var.type == "BOOL") {
         bool b = (val_str == "1" || val_str == "true" || val_str == "True");
         bytes.push_back(b ? 1 : 0);
     } else if (var.type == "REAL") {
-        float f = std::stof(val_str);
+        float f = 0.0f;
+        try { f = std::stof(val_str); } catch (...) {}
         uint32_t val_u;
         std::memcpy(&val_u, &f, sizeof(float));
         for (int i = 0; i < 4; i++) {
@@ -57,8 +75,29 @@ std::vector<uint8_t> WagoNetVarComponent::pack_value(const VarDef &var, const st
                 bytes.push_back((val_u >> (i * 8)) & 0xFF);
             }
         }
+    } else if (var.type == "LREAL") {
+        double d = 0.0;
+        try { d = std::stod(val_str); } catch (...) {}
+        uint64_t val_u;
+        std::memcpy(&val_u, &d, sizeof(double));
+        for (int i = 0; i < 8; i++) {
+            if (big_endian_) {
+                bytes.push_back((val_u >> (56 - i * 8)) & 0xFF);
+            } else {
+                bytes.push_back((val_u >> (i * 8)) & 0xFF);
+            }
+        }
+    } else if (var.type.rfind("STRING", 0) == 0) {
+        for (size_t i = 0; i < var.size; i++) {
+            if (i < val_str.length() && i < var.size - 1) {
+                bytes.push_back(static_cast<uint8_t>(val_str[i]));
+            } else {
+                bytes.push_back(0x00);
+            }
+        }
     } else {
-        int32_t val_i = std::stoi(val_str);
+        int64_t val_i = 0;
+        try { val_i = std::stoll(val_str); } catch (...) {}
         for (size_t i = 0; i < var.size; i++) {
             if (big_endian_) {
                 bytes.push_back((val_i >> ((var.size - 1 - i) * 8)) & 0xFF);
