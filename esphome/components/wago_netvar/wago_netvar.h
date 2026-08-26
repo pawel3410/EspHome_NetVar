@@ -84,7 +84,7 @@ private:
 
     bool big_endian_{false};
     bool pack_bools_{false};
-    bool alignment_{false};
+    bool alignment_{true};
 
     bool send_on_change_{true};
     uint32_t min_interval_ms_{100};
