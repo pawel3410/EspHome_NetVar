@@ -94,12 +94,10 @@ uint16_t WagoNetVarComponent::read_u16(const uint8_t *ptr) {
 }
 
 void WagoNetVarComponent::setup() {
-    ESP_LOGI(TAG, "Start NetVar [Target IP: %s, COB-ID: %d, Port: %d, Read: %s, Write: %s, Alignment: %s]", 
-             ip_address_.c_str(), cob_id_, port_, enable_read_ ? "TAK" : "NIE", enable_write_ ? "TAK" : "NIE", alignment_ ? "TAK" : "NIE");
+    ESP_LOGI(TAG, "Start NetVar [Target IP: %s, COB-ID: %d, Port: %d, Direction: %s, Alignment: %s]", 
+             ip_address_.c_str(), cob_id_, port_, direction_.c_str(), alignment_ ? "TAK" : "NIE");
     
-    if (enable_read_) {
-        udp_.begin(port_);
-    }
+    udp_.begin(port_);
 }
 
 void WagoNetVarComponent::trigger_send_() {
@@ -161,9 +159,18 @@ void WagoNetVarComponent::unpack_payload(const uint8_t *payload, size_t len) {
             bool val = (current_bool_byte >> bool_bit_index) & 0x01;
             var_values_[var.name] = val ? "1" : "0";
             ESP_LOGV(TAG, "Odczyt (pakowany BOOL) <- %s = %s", var.name.c_str(), var_values_[var.name].c_str());
-            if (binary_sensors_.count(var.name) && binary_sensors_[var.name]->state != val) {
-                binary_sensors_[var.name]->publish_state(val);
+
+            if (binary_sensors_.count(var.name)) {
+                if (!binary_sensors_[var.name]->has_state() || binary_sensors_[var.name]->state != val) {
+                    binary_sensors_[var.name]->publish_state(val);
+                }
             }
+            if (switches_.count(var.name)) {
+                if (!switches_[var.name]->has_state() || switches_[var.name]->state != val) {
+                    switches_[var.name]->publish_state(val);
+                }
+            }
+
             bool_bit_index++;
             if (bool_bit_index >= 8) {
                 bool_bit_index = 0;
@@ -181,8 +188,16 @@ void WagoNetVarComponent::unpack_payload(const uint8_t *payload, size_t len) {
                 bool val = (payload[offset] != 0);
                 var_values_[var.name] = val ? "1" : "0";
                 ESP_LOGV(TAG, "Odczyt (BOOL) <- %s = %s", var.name.c_str(), var_values_[var.name].c_str());
-                if (binary_sensors_.count(var.name) && binary_sensors_[var.name]->state != val) {
-                    binary_sensors_[var.name]->publish_state(val);
+
+                if (binary_sensors_.count(var.name)) {
+                    if (!binary_sensors_[var.name]->has_state() || binary_sensors_[var.name]->state != val) {
+                        binary_sensors_[var.name]->publish_state(val);
+                    }
+                }
+                if (switches_.count(var.name)) {
+                    if (!switches_[var.name]->has_state() || switches_[var.name]->state != val) {
+                        switches_[var.name]->publish_state(val);
+                    }
                 }
             } else if (var.type == "REAL") {
                 uint32_t val_u = 0;
@@ -194,10 +209,15 @@ void WagoNetVarComponent::unpack_payload(const uint8_t *payload, size_t len) {
                 std::memcpy(&f, &val_u, sizeof(float));
                 var_values_[var.name] = std::to_string(f);
                 ESP_LOGV(TAG, "Odczyt (REAL) <- %s = %s", var.name.c_str(), var_values_[var.name].c_str());
+
                 if (sensors_.count(var.name)) {
-                    float cur = sensors_[var.name]->get_raw_state();
-                    if (std::isnan(cur) || std::abs(f - cur) >= 0.001f) {
+                    if (!sensors_[var.name]->has_state() || std::abs(f - sensors_[var.name]->state) >= 0.001f) {
                         sensors_[var.name]->publish_state(f);
+                    }
+                }
+                if (numbers_.count(var.name)) {
+                    if (!numbers_[var.name]->has_state() || std::abs(f - numbers_[var.name]->state) >= 0.001f) {
+                        numbers_[var.name]->publish_state(f);
                     }
                 }
             } else if (var.type.rfind("STRING", 0) == 0) {
@@ -210,12 +230,23 @@ void WagoNetVarComponent::unpack_payload(const uint8_t *payload, size_t len) {
                     if (big_endian_) val_i = (val_i << 8) | payload[offset + i];
                     else val_i |= ((int64_t)payload[offset + i] << (i * 8));
                 }
+
+                if (var.type == "SINT") val_i = static_cast<int8_t>(val_i);
+                else if (var.type == "INT") val_i = static_cast<int16_t>(val_i);
+                else if (var.type == "DINT") val_i = static_cast<int32_t>(val_i);
+
                 var_values_[var.name] = std::to_string(val_i);
                 ESP_LOGV(TAG, "Odczyt (%s) <- %s = %s", var.type.c_str(), var.name.c_str(), var_values_[var.name].c_str());
+
+                float f_val = static_cast<float>(val_i);
                 if (sensors_.count(var.name)) {
-                    float f_val = static_cast<float>(val_i);
-                    if (sensors_[var.name]->get_raw_state() != f_val) {
+                    if (!sensors_[var.name]->has_state() || sensors_[var.name]->state != f_val) {
                         sensors_[var.name]->publish_state(f_val);
+                    }
+                }
+                if (numbers_.count(var.name)) {
+                    if (!numbers_[var.name]->has_state() || numbers_[var.name]->state != f_val) {
+                        numbers_[var.name]->publish_state(f_val);
                     }
                 }
             }
