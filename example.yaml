@@ -1,46 +1,118 @@
 esphome:
-  name: wago-netvar-esp32
-
-esp32:
-  board: esp32dev
-
-wifi:
-  ssid: "TwojeWiFi"
-  password: "TwojePassword"
+  name: esphome-wago-demo
+  # 1. ŹRÓDŁO: Statyczne wartości wysyłane jednorazowo przy starcie ESP
+  on_boot:
+    priority: -100
+    then:
+      - lambda: |-
+          // STRING - Statyczna nazwa urządzenia
+          id(my_wago_netvars).set_variable_value("Device_Name", "ESP32_Suszarka");
 
 external_components:
-  - source: github://pawel3410/EspHome_NetVar
-    components: [ wagonetvar ]
+  - source:
+      type: git
+      url: https://github.com/pawel3410/EspHome_NetVar.git
+      ref: main
 
-# Konfiguracja magistrali OneWire i czujnika DS18B20
-dallas:
-  - pin: GPIO23
-    id: my_dallas
+wifi:
+  ssid: "MojaSiecWiFi"
+  password: "TajneHasloWiFi"
+  id: wifi_module
 
+one_wire:
+  - platform: gpio
+    pin: GPIO23
+    id: bus_onewire
+
+# Rejestracja zmiennych w Home Assistant / encje lokalne
 sensor:
+  # 2. ŹRÓDŁO: Fizyczny czujnik temperatury DS18B20
   - platform: dallas
-    dallas_id: my_dallas
-    address: 0x1234567890AB # Podaj adres swojego czujnika
-    name: "Temperatura DS18B20"
-    id: temp_ds18b20
+    one_wire_id: bus_onewire
+    name: "Temperatura Suszarki"
+    id: temp_suszarka
     on_value:
       then:
-        # Gdy tylko odczyta nową temperaturę, przekazujemy ją do naszej zmiennej w NetVars
         - lambda: |-
-            id(my_wago_netvars).set_variable_value("Temperatura", x);
+            // REAL - Wartość zmiennoprzecinkowa z czujnika
+            id(my_wago_netvars).set_variable_value("Temp_Suszarka", x);
 
+  # 3. ŹRÓDŁO: Encja pobrana z Home Assistant
+  - platform: homeassistant
+    entity_id: sensor.temperatura_zewnetrzna
+    id: temp_zewnetrzna
+    on_value:
+      then:
+        - lambda: |-
+            // REAL - Czujnik zewnętrzny pobrany z HA
+            id(my_wago_netvars).set_variable_value("Temp_Zewn", x);
+
+  # 4. ŹRÓDŁO: Licznik czasu pracy urządzenia (Uptime)
+  - platform: uptime
+    name: "Uptime Seconds"
+    id: uptime_sec
+    on_value:
+      then:
+        - lambda: |-
+            // UDINT / DWORD - Czas pracy ESP w sekundach (bezobsługowa konwersja na uint32_t)
+            id(my_wago_netvars).set_variable_value("Uptime_Sec", (uint32_t)x);
+
+  # Siła sygnału WiFi (używana niżej w pętli interval)
+  - platform: wifi_signal
+    id: wifi_signal
+    name: "WiFi Signal"
+
+binary_sensor:
+  # 5. ŹRÓDŁO: Wejście binarne / Krańcówka / Czujnik otwarcia
+  - platform: gpio
+    pin:
+      number: GPIO14
+      mode: INPUT_PULLUP
+    name: "Krańcówka Drzwi"
+    id: krancowka_drzwi
+    on_state:
+      then:
+        - lambda: |-
+            // BOOL - Stan wejścia cyfrowego (true/false)
+            id(my_wago_netvars).set_variable_value("Drzwi_Otwarte", x);
+
+# 6. ŹRÓDŁO: Pętla cykliczna (odświeżanie danych systemowych co 5 sekund)
+interval:
+  - interval: 5s
+    then:
+      - lambda: |-
+          // STRING - Dynamiczny adres IP pobrany z karty WiFi ESP32
+          if (id(wifi_module).is_connected()) {
+            id(my_wago_netvars).set_variable_value("ESP_IP", id(wifi_module).ipv4_address().to_string());
+          }
+          // INT - Poziom sygnału WiFi RSSI
+          if (!isnan(id(wifi_signal).state)) {
+            id(my_wago_netvars).set_variable_value("WiFi_RSSI", (int)id(wifi_signal).state);
+          }
+
+# KONFIGURACJA KOMPONENTU WAGO NETVAR
 wago_netvar:
-  id: my_wago_netvars
-  ip: "192.168.17.44"
-  port: 1202
-  cob_id: 124
-  checksum: 6
-  endian: "little"
-  pack_bools: false
-  alignment: false
-  update_interval: 1s
-  variables:
-    - name: "Pompa_CWi"
-      type: "BOOL"
-    - name: "Temperatura"
-      type: "REAL"
+  - id: my_wago_netvars
+    ip: 192.168.1.100       # IP sterownika PLC Wago
+    port: 1202             # Domyślny port UDP CoDeSys NetVar
+    cob_id: 1              # COB-ID (musi zgadzać się z listą odbiorczą w CoDeSys)
+    checksum: 0            # Suma kontrolna (zgodna z CoDeSys)
+    update_interval: 1s    # Częstotliwość wysyłania paczki UDP
+    endian: little         # Porządek bajtów (little / big)
+    pack_bools: false      # Upakowywanie bitowe BOOL (zgodnie z konf. w Wago)
+    alignment: false       # Wyrównanie do granic słów (alignment)
+    variables:
+      - name: "Temp_Suszarka"
+        type: "REAL"
+      - name: "Temp_Zewn"
+        type: "REAL"
+      - name: "Drzwi_Otwarte"
+        type: "BOOL"
+      - name: "Uptime_Sec"
+        type: "UDINT"
+      - name: "WiFi_RSSI"
+        type: "INT"
+      - name: "ESP_IP"
+        type: "STRING(15)"
+      - name: "Device_Name"
+        type: "STRING(20)"
