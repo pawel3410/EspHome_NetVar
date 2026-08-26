@@ -1,14 +1,16 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.const import CONF_ID, CONF_IP, CONF_PORT, CONF_UPDATE_INTERVAL
+from esphome.const import CONF_ID, CONF_UPDATE_INTERVAL
 
 DEPENDENCIES = ['network']
 AUTO_LOAD = []
 
-# Zmiana namespace na wago_netvar (z podkreśleniem)
 wago_netvar_ns = cg.esphome_ns.namespace('wago_netvar')
 WagoNetVarComponent = wago_netvar_ns.class_('WagoNetVarComponent', cg.PollingComponent)
 
+# Jawna definicja kluczy konfiguracyjnych jako stringi
+CONF_IP = 'ip'
+CONF_PORT = 'port'
 CONF_COB_ID = 'cob_id'
 CONF_CHECKSUM = 'checksum'
 CONF_ENDIAN = 'endian'
