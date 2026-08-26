@@ -160,6 +160,7 @@ void WagoNetVarComponent::unpack_payload(const uint8_t *payload, size_t len) {
             }
             bool val = (current_bool_byte >> bool_bit_index) & 0x01;
             var_values_[var.name] = val ? "1" : "0";
+            ESP_LOGV(TAG, "Odczyt (pakowany BOOL) <- %s = %s", var.name.c_str(), var_values_[var.name].c_str());
             if (binary_sensors_.count(var.name) && binary_sensors_[var.name]->state != val) {
                 binary_sensors_[var.name]->publish_state(val);
             }
@@ -179,6 +180,7 @@ void WagoNetVarComponent::unpack_payload(const uint8_t *payload, size_t len) {
             if (var.type == "BOOL") {
                 bool val = (payload[offset] != 0);
                 var_values_[var.name] = val ? "1" : "0";
+                ESP_LOGV(TAG, "Odczyt (BOOL) <- %s = %s", var.name.c_str(), var_values_[var.name].c_str());
                 if (binary_sensors_.count(var.name) && binary_sensors_[var.name]->state != val) {
                     binary_sensors_[var.name]->publish_state(val);
                 }
@@ -191,6 +193,7 @@ void WagoNetVarComponent::unpack_payload(const uint8_t *payload, size_t len) {
                 float f;
                 std::memcpy(&f, &val_u, sizeof(float));
                 var_values_[var.name] = std::to_string(f);
+                ESP_LOGV(TAG, "Odczyt (REAL) <- %s = %s", var.name.c_str(), var_values_[var.name].c_str());
                 if (sensors_.count(var.name)) {
                     float cur = sensors_[var.name]->get_raw_state();
                     if (std::isnan(cur) || std::abs(f - cur) >= 0.001f) {
@@ -200,6 +203,7 @@ void WagoNetVarComponent::unpack_payload(const uint8_t *payload, size_t len) {
             } else if (var.type.rfind("STRING", 0) == 0) {
                 std::string str_val((const char*)(payload + offset), strnlen((const char*)(payload + offset), var.size));
                 var_values_[var.name] = str_val;
+                ESP_LOGV(TAG, "Odczyt (STRING) <- %s = %s", var.name.c_str(), var_values_[var.name].c_str());
             } else {
                 int64_t val_i = 0;
                 for (size_t i = 0; i < var.size; i++) {
@@ -207,6 +211,7 @@ void WagoNetVarComponent::unpack_payload(const uint8_t *payload, size_t len) {
                     else val_i |= ((int64_t)payload[offset + i] << (i * 8));
                 }
                 var_values_[var.name] = std::to_string(val_i);
+                ESP_LOGV(TAG, "Odczyt (%s) <- %s = %s", var.type.c_str(), var.name.c_str(), var_values_[var.name].c_str());
                 if (sensors_.count(var.name)) {
                     float f_val = static_cast<float>(val_i);
                     if (sensors_[var.name]->get_raw_state() != f_val) {
@@ -289,6 +294,7 @@ void WagoNetVarComponent::send_packet_() {
 
     for (const auto &var : variables_) {
         std::string val_str = var_values_[var.name];
+        ESP_LOGV(TAG, "Wysyłanie -> %s = %s (typ: %s)", var.name.c_str(), val_str.c_str(), var.type.c_str());
 
         if (var.type != "BOOL" && bool_bit_index > 0) {
             payload.push_back(current_bool_byte);
