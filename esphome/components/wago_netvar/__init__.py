@@ -37,8 +37,8 @@ CONFIG_SCHEMA = cv.polling_component_schema('1s').extend({
 })
 
 async def to_code(config):
-    # Używamy Pvariable zamiast new_variable, aby utworzyć poprawny wskaźnik (Pointer)
-    var = cg.Pvariable(config[CONF_ID], WagoNetVarComponent())
+    # Poprawiona deklaracja wskaźnika dla nowego ESPHome
+    var = cg.Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
     cg.add(var.set_ip(str(config[CONF_IP])))
