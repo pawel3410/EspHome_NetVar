@@ -26,7 +26,7 @@ VARIABLE_SCHEMA = cv.Schema({
 
 CONFIG_SCHEMA = cv.polling_component_schema('1s').extend({
     cv.GenerateID(): cv.declare_id(WagoNetVarComponent),
-    cv.Required(CONF_IP): cv.ipv4,
+    cv.Required(CONF_IP): cv.ip_address, # Zmieniono z cv.ipv4 na cv.ip_address
     cv.Required(CONF_PORT): cv.port,
     cv.Required(CONF_COB_ID): cv.int_,
     cv.Required(CONF_CHECKSUM): cv.int_,
