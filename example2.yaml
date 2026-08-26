@@ -1,0 +1,62 @@
+esphome:
+  name: suszarka
+
+esp32:
+  board: esp32dev
+
+wifi:
+  ssid: "MojaSiecWiFi"
+  password: "HasloWiFi"
+
+logger:
+
+network:
+
+# --- KOMPONENT WAGO NETVAR ---
+wago_netvar:
+  # Odbiór z WAGO (PLC -> ESP32)
+  - id: wago_rx
+    direction: read
+    port: 1202
+    cob_id: 2
+    checksum: 54321
+    variables:
+      - name: "Status_Pompy"
+        type: "BOOL"
+        sensor_name: "Status Pompy WAGO"
+
+      - name: "Temp_Zadana"
+        type: "REAL"
+        sensor_name: "Temperatura Zadana WAGO"
+        unit_of_measurement: "°C"
+        accuracy_decimals: 1
+
+  # Wysyłanie do WAGO (ESP32 -> PLC)
+  - id: wago_tx
+    direction: write
+    ip_address: 192.168.1.100
+    port: 1202
+    cob_id: 1
+    checksum: 12345
+    update_interval: 1s      # Cykliczny keep-alive
+    send_on_change: true     # Wysyłka natychmiast po zmianie
+    min_interval: 100ms      # Ochrona przed zalaniem sieci (throttling)
+    variables:
+      - name: "Temp_Suszarka"
+        type: "REAL"
+        sensor_name: "Zadana Temp Suszarki"
+        min_value: 0
+        max_value: 100
+        step: 0.5
+        unit_of_measurement: "°C"
+
+      - name: "Moc_Grzania_Pct"
+        type: "BYTE"
+        sensor_name: "Moc Grzania (%)"
+        min_value: 0
+        max_value: 100
+        step: 1
+
+      - name: "Wlacz_Grzanie"
+        type: "BOOL"
+        sensor_name: "Przełącznik Grzania"
