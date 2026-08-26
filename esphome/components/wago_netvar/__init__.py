@@ -37,7 +37,8 @@ CONFIG_SCHEMA = cv.polling_component_schema('1s').extend({
 })
 
 async def to_code(config):
-    var = cg.new_variable(config[CONF_ID])
+    # Dodano klasę WagoNetVarComponent jako argument rhs
+    var = cg.new_variable(config[CONF_ID], WagoNetVarComponent())
     await cg.register_component(var, config)
 
     cg.add(var.set_ip(str(config[CONF_IP])))
