@@ -19,7 +19,7 @@ WagoNumber = wago_netvar_ns.class_("WagoNumber", number.Number)
 CONF_COB_ID = "cob_id"
 CONF_CHECKSUM = "checksum"
 CONF_DIRECTION = "direction"
-CONF_BIG_ENDIAN = "big_endian"
+CONF_ENDIAN = "endian"
 CONF_PACK_BOOLS = "pack_bools"
 CONF_ALIGNMENT = "alignment"
 CONF_SEND_ON_CHANGE = "send_on_change"
@@ -74,7 +74,7 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_COB_ID, default=1): cv.uint16_t,
             cv.Optional(CONF_CHECKSUM, default=0): cv.uint16_t,
             cv.Optional(CONF_DIRECTION, default="write"): cv.one_of("read", "write", "both", lower=True),
-            cv.Optional(CONF_BIG_ENDIAN, default=False): cv.boolean,
+            cv.Optional(CONF_ENDIAN, default="little"): cv.one_of("little", "big", lower=True),
             cv.Optional(CONF_PACK_BOOLS, default=False): cv.boolean,
             cv.Optional(CONF_ALIGNMENT, default=True): cv.boolean,
             cv.Optional(CONF_SEND_ON_CHANGE, default=True): cv.boolean,
@@ -99,7 +99,7 @@ async def to_code(config):
     cg.add(var.set_cob_id(config[CONF_COB_ID]))
     cg.add(var.set_checksum(config[CONF_CHECKSUM]))
     cg.add(var.set_direction(config[CONF_DIRECTION]))
-    cg.add(var.set_big_endian(config[CONF_BIG_ENDIAN]))
+    cg.add(var.set_big_endian(config[CONF_ENDIAN] == "big"))
     cg.add(var.set_pack_bools(config[CONF_PACK_BOOLS]))
     cg.add(var.set_alignment(config[CONF_ALIGNMENT]))
     cg.add(var.set_send_on_change(config[CONF_SEND_ON_CHANGE]))
