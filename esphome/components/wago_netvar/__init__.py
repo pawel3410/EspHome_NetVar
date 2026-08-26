@@ -8,7 +8,6 @@ AUTO_LOAD = []
 wago_netvar_ns = cg.esphome_ns.namespace('wago_netvar')
 WagoNetVarComponent = wago_netvar_ns.class_('WagoNetVarComponent', cg.PollingComponent)
 
-# Jawna definicja kluczy konfiguracyjnych jako stringi
 CONF_IP = 'ip'
 CONF_PORT = 'port'
 CONF_COB_ID = 'cob_id'
@@ -25,7 +24,7 @@ VARIABLE_SCHEMA = cv.Schema({
     cv.Required(CONF_VAR_TYPE): cv.string,
 })
 
-CONFIG_SCHEMA = cv.schema_extender(cv.polling_component_schema('1s'))(cv.Schema({
+CONFIG_SCHEMA = cv.polling_component_schema('1s').extend({
     cv.GenerateID(): cv.declare_id(WagoNetVarComponent),
     cv.Required(CONF_IP): cv.ipv4,
     cv.Required(CONF_PORT): cv.port,
@@ -35,7 +34,7 @@ CONFIG_SCHEMA = cv.schema_extender(cv.polling_component_schema('1s'))(cv.Schema(
     cv.Optional(CONF_PACK_BOOLS, default=False): cv.boolean,
     cv.Optional(CONF_ALIGNMENT, default=False): cv.boolean,
     cv.Required(CONF_VARIABLES): cv.ensure_list(VARIABLE_SCHEMA),
-}))
+})
 
 async def to_code(config):
     var = cg.new_variable(config[CONF_ID])
