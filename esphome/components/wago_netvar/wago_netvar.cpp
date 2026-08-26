@@ -1,5 +1,4 @@
 #include "wago_netvar.h"
-#include <WiFi.h>
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
@@ -266,10 +265,6 @@ std::vector<uint8_t> WagoNetVarComponent::pack_value(const VarDef &var, const st
 void WagoNetVarComponent::send_packet_() {
     if (ip_address_.empty()) {
         ESP_LOGE(TAG, "Brak skonfigurowanego adresu IP.");
-        return;
-    }
-
-    if (WiFi.status() != WL_CONNECTED) {
         return;
     }
 
