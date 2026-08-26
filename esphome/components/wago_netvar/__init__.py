@@ -94,7 +94,7 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_NUMBERS): cv.ensure_list(NUMBER_SCHEMA),
         }
     )
-    .extend(cv.POLLING_COMPONENT_SCHEMA)
+    .extend(cv.polling_component_schema("10s"))
 )
 
 
