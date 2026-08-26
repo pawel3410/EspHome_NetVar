@@ -1,40 +1,27 @@
 #include "wago_netvar.h"
+#include <WiFi.h>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
+#include <algorithm>
 
 namespace esphome {
 namespace wago_netvar {
 
-void WagoNetVarComponent::add_variable(const std::string &name, const std::string &type) {
-    size_t size = 1;
-    size_t align = 1;
-    get_type_info(type, size, align);
-    variables_.push_back({name, type, size, align});
-    var_values_[name] = "0";
+static const char *const TAG = "wago_netvar";
+
+void WagoSwitch::write_state(bool state) {
+    if (parent_ != nullptr) {
+        parent_->set_variable_value(var_name_, state);
+        publish_state(state);
+    }
 }
 
-void WagoNetVarComponent::set_variable_value(const std::string &name, float value) {
-    var_values_[name] = std::to_string(value);
-}
-
-void WagoNetVarComponent::set_variable_value(const std::string &name, double value) {
-    var_values_[name] = std::to_string(value);
-}
-
-void WagoNetVarComponent::set_variable_value(const std::string &name, bool value) {
-    var_values_[name] = value ? "1" : "0";
-}
-
-void WagoNetVarComponent::set_variable_value(const std::string &name, int value) {
-    var_values_[name] = std::to_string(value);
-}
-
-void WagoNetVarComponent::set_variable_value(const std::string &name, uint32_t value) {
-    var_values_[name] = std::to_string(value);
-}
-
-void WagoNetVarComponent::set_variable_value(const std::string &name, const std::string &value) {
-    var_values_[name] = value;
+void WagoNumber::control(float value) {
+    if (parent_ != nullptr) {
+        parent_->set_variable_value(var_name_, value);
+        publish_state(value);
+    }
 }
 
 void WagoNetVarComponent::get_type_info(const std::string &type, size_t &size, size_t &align) {
@@ -57,6 +44,173 @@ void WagoNetVarComponent::get_type_info(const std::string &type, size_t &size, s
     }
 }
 
+void WagoNetVarComponent::add_variable(const std::string &name, const std::string &type) {
+    size_t size = 1, align = 1;
+    get_type_info(type, size, align);
+    variables_.push_back({name, type, size, align});
+    if (var_values_.find(name) == var_values_.end()) {
+        var_values_[name] = "0";
+    }
+}
+
+void WagoNetVarComponent::set_variable_value(const std::string &name, float value) {
+    std::string new_val = std::to_string(value);
+    if (var_values_[name] != new_val) {
+        var_values_[name] = new_val;
+        is_dirty_ = true;
+        trigger_send_();
+    }
+}
+
+void WagoNetVarComponent::set_variable_value(const std::string &name, bool value) {
+    std::string new_val = value ? "1" : "0";
+    if (var_values_[name] != new_val) {
+        var_values_[name] = new_val;
+        is_dirty_ = true;
+        trigger_send_();
+    }
+}
+
+void WagoNetVarComponent::set_variable_value(const std::string &name, const std::string &value) {
+    if (var_values_[name] != value) {
+        var_values_[name] = value;
+        is_dirty_ = true;
+        trigger_send_();
+    }
+}
+
+std::string WagoNetVarComponent::get_variable_value(const std::string &name) { return var_values_[name]; }
+
+uint16_t WagoNetVarComponent::read_u16(const uint8_t *ptr) {
+    return big_endian_ ? ((ptr[0] << 8) | ptr[1]) : (ptr[0] | (ptr[1] << 8));
+}
+
+void WagoNetVarComponent::setup() {
+    ESP_LOGI(TAG, "Start NetVar [Target IP: %s, COB-ID: %d, Port: %d, Read: %s, Write: %s]", 
+             ip_address_.c_str(), cob_id_, port_, enable_read_ ? "TAK" : "NIE", enable_write_ ? "TAK" : "NIE");
+    
+    if (enable_read_) {
+        udp_.begin(port_);
+    }
+}
+
+void WagoNetVarComponent::trigger_send_() {
+    if (!enable_write_ || !send_on_change_) return;
+
+    uint32_t now = millis();
+    if (now - last_sent_time_ >= min_interval_ms_) {
+        send_packet_();
+    }
+}
+
+void WagoNetVarComponent::loop() {
+    if (enable_read_) {
+        int packet_size = udp_.parsePacket();
+        if (packet_size >= 20) {
+            std::vector<uint8_t> buffer(packet_size);
+            udp_.read(buffer.data(), packet_size);
+
+            if (buffer[0] == 0x00 && buffer[1] == 0x2D && buffer[2] == 0x53 && buffer[3] == 0x33) {
+                uint16_t pkt_cob_id = read_u16(&buffer[8]);
+                uint16_t pkt_checksum = read_u16(&buffer[12]);
+
+                if (pkt_cob_id == cob_id_ && (checksum_ == 0 || pkt_checksum == checksum_)) {
+                    unpack_payload(buffer.data() + 20, packet_size - 20);
+                }
+            }
+        }
+    }
+
+    if (enable_write_ && is_dirty_) {
+        uint32_t now = millis();
+        if (now - last_sent_time_ >= min_interval_ms_) {
+            send_packet_();
+        }
+    }
+}
+
+void WagoNetVarComponent::update() {
+    if (enable_write_) {
+        send_packet_();
+    }
+}
+
+void WagoNetVarComponent::unpack_payload(const uint8_t *payload, size_t len) {
+    size_t offset = 0;
+    uint8_t bool_bit_index = 0;
+    uint8_t current_bool_byte = 0;
+
+    for (const auto &var : variables_) {
+        if (var.type != "BOOL" && bool_bit_index > 0) {
+            offset++;
+            bool_bit_index = 0;
+        }
+
+        if (var.type == "BOOL" && pack_bools_) {
+            if (bool_bit_index == 0 && offset < len) {
+                current_bool_byte = payload[offset];
+            }
+            bool val = (current_bool_byte >> bool_bit_index) & 0x01;
+            var_values_[var.name] = val ? "1" : "0";
+            if (binary_sensors_.count(var.name) && binary_sensors_[var.name]->state != val) {
+                binary_sensors_[var.name]->publish_state(val);
+            }
+            bool_bit_index++;
+            if (bool_bit_index >= 8) {
+                bool_bit_index = 0;
+                offset++;
+            }
+        } else {
+            if (alignment_ && var.align > 1) {
+                size_t rem = offset % var.align;
+                if (rem != 0) offset += (var.align - rem);
+            }
+
+            if (offset + var.size > len) break;
+
+            if (var.type == "BOOL") {
+                bool val = (payload[offset] != 0);
+                var_values_[var.name] = val ? "1" : "0";
+                if (binary_sensors_.count(var.name) && binary_sensors_[var.name]->state != val) {
+                    binary_sensors_[var.name]->publish_state(val);
+                }
+            } else if (var.type == "REAL") {
+                uint32_t val_u = 0;
+                for (int i = 0; i < 4; i++) {
+                    if (big_endian_) val_u = (val_u << 8) | payload[offset + i];
+                    else val_u |= ((uint32_t)payload[offset + i] << (i * 8));
+                }
+                float f;
+                std::memcpy(&f, &val_u, sizeof(float));
+                var_values_[var.name] = std::to_string(f);
+                if (sensors_.count(var.name)) {
+                    float cur = sensors_[var.name]->raw_state;
+                    if (std::isnan(cur) || std::abs(f - cur) >= 0.001f) {
+                        sensors_[var.name]->publish_state(f);
+                    }
+                }
+            } else if (var.type.rfind("STRING", 0) == 0) {
+                std::string str_val((const char*)(payload + offset), strnlen((const char*)(payload + offset), var.size));
+                var_values_[var.name] = str_val;
+            } else {
+                int64_t val_i = 0;
+                for (size_t i = 0; i < var.size; i++) {
+                    if (big_endian_) val_i = (val_i << 8) | payload[offset + i];
+                    else val_i |= ((int64_t)payload[offset + i] << (i * 8));
+                }
+                var_values_[var.name] = std::to_string(val_i);
+                if (sensors_.count(var.name)) {
+                    float f_val = static_cast<float>(val_i);
+                    if (sensors_[var.name]->raw_state != f_val) {
+                        sensors_[var.name]->publish_state(f_val);
+                    }
+                }
+            }
+            offset += var.size;
+        }
+    }
+}
+
 std::vector<uint8_t> WagoNetVarComponent::pack_value(const VarDef &var, const std::string &val_str) {
     std::vector<uint8_t> bytes;
 
@@ -64,28 +218,13 @@ std::vector<uint8_t> WagoNetVarComponent::pack_value(const VarDef &var, const st
         bool b = (val_str == "1" || val_str == "true" || val_str == "True");
         bytes.push_back(b ? 1 : 0);
     } else if (var.type == "REAL") {
-        float f = 0.0f;
-        try { f = std::stof(val_str); } catch (...) {}
+        char *endptr = nullptr;
+        float f = std::strtof(val_str.c_str(), &endptr);
         uint32_t val_u;
         std::memcpy(&val_u, &f, sizeof(float));
         for (int i = 0; i < 4; i++) {
-            if (big_endian_) {
-                bytes.push_back((val_u >> (24 - i * 8)) & 0xFF);
-            } else {
-                bytes.push_back((val_u >> (i * 8)) & 0xFF);
-            }
-        }
-    } else if (var.type == "LREAL") {
-        double d = 0.0;
-        try { d = std::stod(val_str); } catch (...) {}
-        uint64_t val_u;
-        std::memcpy(&val_u, &d, sizeof(double));
-        for (int i = 0; i < 8; i++) {
-            if (big_endian_) {
-                bytes.push_back((val_u >> (56 - i * 8)) & 0xFF);
-            } else {
-                bytes.push_back((val_u >> (i * 8)) & 0xFF);
-            }
+            if (big_endian_) bytes.push_back((val_u >> (24 - i * 8)) & 0xFF);
+            else bytes.push_back((val_u >> (i * 8)) & 0xFF);
         }
     } else if (var.type.rfind("STRING", 0) == 0) {
         for (size_t i = 0; i < var.size; i++) {
@@ -96,25 +235,50 @@ std::vector<uint8_t> WagoNetVarComponent::pack_value(const VarDef &var, const st
             }
         }
     } else {
-        int64_t val_i = 0;
-        try { val_i = std::stoll(val_str); } catch (...) {}
+        char *endptr = nullptr;
+        int64_t val_i = std::strtoll(val_str.c_str(), &endptr, 10);
+
+        int64_t min_lim = 0, max_lim = 0;
+        bool check_range = true;
+
+        if (var.type == "BYTE" || var.type == "USINT") { min_lim = 0; max_lim = 255; }
+        else if (var.type == "SINT") { min_lim = -128; max_lim = 127; }
+        else if (var.type == "WORD" || var.type == "UINT") { min_lim = 0; max_lim = 65535; }
+        else if (var.type == "INT") { min_lim = -32768; max_lim = 32767; }
+        else if (var.type == "DWORD" || var.type == "UDINT") { min_lim = 0; max_lim = 4294967295LL; }
+        else if (var.type == "DINT") { min_lim = -2147483648LL; max_lim = 2147483647LL; }
+        else { check_range = false; }
+
+        if (check_range && (val_i < min_lim || val_i > max_lim)) {
+            ESP_LOGW(TAG, "Zmienna '%s' (%s) przekracza zakres [%lld, %lld]: %lld. Przycięto.",
+                     var.name.c_str(), var.type.c_str(), (long long)min_lim, (long long)max_lim, (long long)val_i);
+            val_i = std::clamp(val_i, min_lim, max_lim);
+        }
+
         for (size_t i = 0; i < var.size; i++) {
-            if (big_endian_) {
-                bytes.push_back((val_i >> ((var.size - 1 - i) * 8)) & 0xFF);
-            } else {
-                bytes.push_back((val_i >> (i * 8)) & 0xFF);
-            }
+            if (big_endian_) bytes.push_back((val_i >> ((var.size - 1 - i) * 8)) & 0xFF);
+            else bytes.push_back((val_i >> (i * 8)) & 0xFF);
         }
     }
     return bytes;
 }
 
-void WagoNetVarComponent::setup() {
-    ESP_LOGI("wago_netvar", "Inicjalizacja komponentu WagoNetVar (COB-ID: %d, Checksum: %d)", cob_id_, checksum_);
-    udp_.begin(port_);
-}
+void WagoNetVarComponent::send_packet_() {
+    if (ip_address_.empty()) {
+        ESP_LOGE(TAG, "Brak skonfigurowanego adresu IP.");
+        return;
+    }
 
-void WagoNetVarComponent::update() {
+    if (WiFi.status() != WL_CONNECTED) {
+        return;
+    }
+
+    IPAddress target_ip;
+    if (!target_ip.fromString(ip_address_.c_str())) {
+        ESP_LOGE(TAG, "Nieprawidłowy format adresu IP: '%s'. Transmisja przerwana.", ip_address_.c_str());
+        return;
+    }
+
     std::vector<uint8_t> payload;
     uint8_t bool_bit_index = 0;
     uint8_t current_bool_byte = 0;
@@ -129,10 +293,7 @@ void WagoNetVarComponent::update() {
         }
 
         if (var.type == "BOOL" && pack_bools_) {
-            bool val_bool = (val_str == "1" || val_str == "true");
-            if (val_bool) {
-                current_bool_byte |= (1 << bool_bit_index);
-            }
+            if (val_str == "1" || val_str == "true") current_bool_byte |= (1 << bool_bit_index);
             bool_bit_index++;
             if (bool_bit_index >= 8) {
                 payload.push_back(current_bool_byte);
@@ -143,51 +304,43 @@ void WagoNetVarComponent::update() {
             if (alignment_ && var.align > 1) {
                 size_t rem = payload.size() % var.align;
                 if (rem != 0) {
-                    for (size_t i = 0; i < (var.align - rem); i++) {
-                        payload.push_back(0x00);
-                    }
+                    for (size_t i = 0; i < (var.align - rem); i++) payload.push_back(0x00);
                 }
             }
-
             std::vector<uint8_t> packed = pack_value(var, val_str);
             payload.insert(payload.end(), packed.begin(), packed.end());
         }
     }
 
-    if (bool_bit_index > 0) {
-        payload.push_back(current_bool_byte);
-    }
+    if (bool_bit_index > 0) payload.push_back(current_bool_byte);
 
     uint8_t header[20] = {0};
     header[0] = 0x00; header[1] = 0x2D; header[2] = 0x53; header[3] = 0x33;
-    
     uint16_t total_len = 20 + payload.size();
 
     auto write_u16 = [this](uint8_t* ptr, uint16_t val) {
-        if (big_endian_) {
-            ptr[0] = (val >> 8) & 0xFF;
-            ptr[1] = val & 0xFF;
-        } else {
-            ptr[0] = val & 0xFF;
-            ptr[1] = (val >> 8) & 0xFF;
-        }
+        if (big_endian_) { ptr[0] = (val >> 8) & 0xFF; ptr[1] = val & 0xFF; }
+        else { ptr[0] = val & 0xFF; ptr[1] = (val >> 8) & 0xFF; }
     };
 
     write_u16(&header[8], cob_id_);
     write_u16(&header[12], checksum_);
     write_u16(&header[14], total_len);
-    write_u16(&header[16], sequence_counter_);
-    sequence_counter_++;
+    write_u16(&header[16], sequence_counter_++);
 
-    IPAddress target_ip;
-    target_ip.fromString(ip_str_.c_str());
+    if (!udp_.beginPacket(target_ip, port_)) {
+        ESP_LOGE(TAG, "Błąd inicjalizacji UDP do %s:%d", ip_address_.c_str(), port_);
+        return;
+    }
 
-    udp_.beginPacket(target_ip, port_);
     udp_.write(header, 20);
     if (!payload.empty()) {
         udp_.write(payload.data(), payload.size());
     }
     udp_.endPacket();
+
+    last_sent_time_ = millis();
+    is_dirty_ = false;
 }
 
 } // namespace wago_netvar
