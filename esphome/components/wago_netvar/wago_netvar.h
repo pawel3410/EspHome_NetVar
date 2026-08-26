@@ -14,7 +14,7 @@ struct VarDef {
     std::string type;
     size_t size;
     size_t align;
-    std::string raw_value = "0"; // Przechowywana wartość tekstowa/licz osobno
+    std::string raw_value = "0"; // Przechowywana wartość (domyślnie "0")
 };
 
 class WagoNetVarComponent : public PollingComponent {
@@ -29,7 +29,7 @@ public:
 
     void add_variable(const std::string &name, const std::string &type);
     
-    // Nowa metoda do aktualizacji wartości danej zmiennej po nazwie
+    // Metody do aktualizacji wartości danej zmiennej po nazwie (np. dla lambdy z czujnika)
     void set_variable_value(const std::string &name, float value);
     void set_variable_value(const std::string &name, bool value);
 
@@ -47,12 +47,12 @@ private:
 
     WiFiUDP udp_;
     std::vector<VarDef> variables_;
-    std::map<std::string, std::string> var_values_; // Przechowywane wartości
+    std::map<std::string, std::string> var_values_; 
     uint16_t sequence_counter_ = 1;
 
     void get_type_info(const std::string &type, size_t &size, size_t &align);
     std::vector<uint8_t> pack_value(const VarDef &var, const std::string &val_str);
 };
 
-} // namespace wagonetvar
+} // namespace wago_netvar
 } // namespace esphome
