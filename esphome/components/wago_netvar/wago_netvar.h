@@ -9,6 +9,7 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <algorithm>
 
 namespace esphome {
 namespace wago_netvar {
@@ -47,8 +48,13 @@ public:
     void set_cob_id(uint16_t cob_id) { cob_id_ = cob_id; }
     void set_checksum(uint16_t checksum) { checksum_ = checksum; }
 
-    void set_enable_read(bool enable) { enable_read_ = enable; }
-    void set_enable_write(bool enable) { enable_write_ = enable; }
+    void set_direction(const std::string &direction) {
+        direction_ = direction;
+        std::string dir = direction;
+        std::transform(dir.begin(), dir.end(), dir.begin(), ::tolower);
+        enable_read_ = (dir == "read" || dir == "both");
+        enable_write_ = (dir == "write" || dir == "both");
+    }
 
     void set_big_endian(bool big_endian) { big_endian_ = big_endian; }
     void set_pack_bools(bool pack) { pack_bools_ = pack; }
@@ -61,6 +67,8 @@ public:
 
     void register_sensor(const std::string &var_name, sensor::Sensor *s) { sensors_[var_name] = s; }
     void register_binary_sensor(const std::string &var_name, binary_sensor::BinarySensor *bs) { binary_sensors_[var_name] = bs; }
+    void register_switch(const std::string &var_name, switch_::Switch *sw) { switches_[var_name] = sw; }
+    void register_number(const std::string &var_name, number::Number *num) { numbers_[var_name] = num; }
 
     void set_variable_value(const std::string &name, float value);
     void set_variable_value(const std::string &name, int value);
@@ -78,6 +86,7 @@ private:
     uint16_t port_{1202};
     uint16_t cob_id_{1};
     uint16_t checksum_{0};
+    std::string direction_{"write"};
 
     bool enable_read_{false};
     bool enable_write_{true};
@@ -97,6 +106,8 @@ private:
     std::map<std::string, std::string> var_values_;
     std::map<std::string, sensor::Sensor*> sensors_;
     std::map<std::string, binary_sensor::BinarySensor*> binary_sensors_;
+    std::map<std::string, switch_::Switch*> switches_;
+    std::map<std::string, number::Number*> numbers_;
 
     uint16_t sequence_counter_{1};
 
