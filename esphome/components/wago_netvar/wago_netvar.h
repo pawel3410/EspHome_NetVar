@@ -1,21 +1,32 @@
 #pragma once
 
 #include "esphome.h"
-#include "esphome/components/sensor/sensor.h"
-#include "esphome/components/binary_sensor/binary_sensor.h"
-#include "esphome/components/number/number.h"
-#include "esphome/components/switch/switch.h"
 #include <WiFiUdp.h>
 #include <vector>
 #include <string>
-#include <map>
-#include <algorithm>
+
+#ifdef USE_SENSOR
+#include "esphome/components/sensor/sensor.h"
+#endif
+
+#ifdef USE_BINARY_SENSOR
+#include "esphome/components/binary_sensor/binary_sensor.h"
+#endif
+
+#ifdef USE_NUMBER
+#include "esphome/components/number/number.h"
+#endif
+
+#ifdef USE_SWITCH
+#include "esphome/components/switch/switch.h"
+#endif
 
 namespace esphome {
 namespace wago_netvar {
 
 class WagoNetVarComponent;
 
+#ifdef USE_SWITCH
 class WagoSwitch : public switch_::Switch {
 public:
     void set_parent(WagoNetVarComponent *parent, const std::string &var_name) { parent_ = parent; var_name_ = var_name; }
@@ -24,7 +35,9 @@ protected:
     WagoNetVarComponent *parent_{nullptr};
     std::string var_name_;
 };
+#endif
 
+#ifdef USE_NUMBER
 class WagoNumber : public number::Number {
 public:
     void set_parent(WagoNetVarComponent *parent, const std::string &var_name) { parent_ = parent; var_name_ = var_name; }
@@ -33,12 +46,28 @@ protected:
     WagoNetVarComponent *parent_{nullptr};
     std::string var_name_;
 };
+#endif
 
 struct VarDef {
     std::string name;
     std::string type;
     size_t size;
     size_t align;
+    size_t byte_offset{0};
+    uint8_t bit_offset{0};
+
+#ifdef USE_SENSOR
+    sensor::Sensor* sensor_ptr{nullptr};
+#endif
+#ifdef USE_BINARY_SENSOR
+    binary_sensor::BinarySensor* binary_sensor_ptr{nullptr};
+#endif
+#ifdef USE_SWITCH
+    switch_::Switch* switch_ptr{nullptr};
+#endif
+#ifdef USE_NUMBER
+    number::Number* number_ptr{nullptr};
+#endif
 };
 
 class WagoNetVarComponent : public PollingComponent {
@@ -59,22 +88,40 @@ public:
     void set_big_endian(bool big_endian) { big_endian_ = big_endian; }
     void set_pack_bools(bool pack) { pack_bools_ = pack; }
     void set_alignment(bool align) { alignment_ = align; }
-
     void set_send_on_change(bool enable) { send_on_change_ = enable; }
     void set_min_interval(uint32_t ms) { min_interval_ms_ = ms; }
 
     void add_variable(const std::string &name, const std::string &type);
 
-    void register_sensor(const std::string &var_name, sensor::Sensor *s) { sensors_[var_name] = s; }
-    void register_binary_sensor(const std::string &var_name, binary_sensor::BinarySensor *bs) { binary_sensors_[var_name] = bs; }
-    void register_switch(const std::string &var_name, switch_::Switch *sw) { switches_[var_name] = sw; }
-    void register_number(const std::string &var_name, number::Number *num) { numbers_[var_name] = num; }
+#ifdef USE_SENSOR
+    void register_sensor(const std::string &var_name, sensor::Sensor *s) {
+        VarDef *v = get_var(var_name);
+        if (v) v->sensor_ptr = s;
+    }
+#endif
+#ifdef USE_BINARY_SENSOR
+    void register_binary_sensor(const std::string &var_name, binary_sensor::BinarySensor *bs) {
+        VarDef *v = get_var(var_name);
+        if (v) v->binary_sensor_ptr = bs;
+    }
+#endif
+#ifdef USE_SWITCH
+    void register_switch(const std::string &var_name, switch_::Switch *sw) {
+        VarDef *v = get_var(var_name);
+        if (v) v->switch_ptr = sw;
+    }
+#endif
+#ifdef USE_NUMBER
+    void register_number(const std::string &var_name, number::Number *num) {
+        VarDef *v = get_var(var_name);
+        if (v) v->number_ptr = num;
+    }
+#endif
 
     void set_variable_value(const std::string &name, float value);
     void set_variable_value(const std::string &name, int value);
     void set_variable_value(const std::string &name, bool value);
     void set_variable_value(const std::string &name, const std::string &value);
-
     std::string get_variable_value(const std::string &name);
 
     void setup() override;
@@ -90,7 +137,6 @@ private:
 
     bool enable_read_{false};
     bool enable_write_{true};
-
     bool big_endian_{false};
     bool pack_bools_{false};
     bool alignment_{true};
@@ -99,24 +145,24 @@ private:
     uint32_t min_interval_ms_{100};
     uint32_t last_sent_time_{0};
     bool is_dirty_{false};
+    bool first_rx_done_{false};
 
     WiFiUDP udp_;
-
     std::vector<VarDef> variables_;
-    std::map<std::string, std::string> var_values_;
-    std::map<std::string, sensor::Sensor*> sensors_;
-    std::map<std::string, binary_sensor::BinarySensor*> binary_sensors_;
-    std::map<std::string, switch_::Switch*> switches_;
-    std::map<std::string, number::Number*> numbers_;
+    
+    // Płaskie bufory pamięci zastępujące mapy stringów!
+    size_t payload_size_{0};
+    std::vector<uint8_t> rx_buffer_;
+    std::vector<uint8_t> tx_buffer_;
+    std::vector<uint8_t> rx_packet_buffer_;
 
     uint16_t sequence_counter_{1};
 
     void trigger_send_();
     void send_packet_();
     void get_type_info(const std::string &type, size_t &size, size_t &align);
-    std::vector<uint8_t> pack_value(const VarDef &var, const std::string &val_str);
     void unpack_payload(const uint8_t *payload, size_t len);
-    uint16_t read_u16(const uint8_t *ptr);
+    VarDef* get_var(const std::string &name);
 };
 
 } // namespace wago_netvar
