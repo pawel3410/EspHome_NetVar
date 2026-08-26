@@ -5,6 +5,7 @@
 
 namespace esphome {
 namespace wago_netvar {
+static const char *const TAG = "wago_netvar";
 
 void WagoNetVarComponent::add_variable(const std::string &name, const std::string &type) {
     size_t size = 1;
