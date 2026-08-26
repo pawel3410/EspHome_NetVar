@@ -1,5 +1,6 @@
 #include "wago_netvar.h"
 #include <cmath>
+#include <cstring> // Niezbędne dla std::memcpy
 
 namespace esphome {
 namespace wago_netvar {
@@ -57,7 +58,6 @@ std::vector<uint8_t> WagoNetVarComponent::pack_value(const VarDef &var, const st
             }
         }
     } else {
-        // Dla typów całkowitych (INT, DINT, WORD itp.)
         int32_t val_i = std::stoi(val_str);
         for (size_t i = 0; i < var.size; i++) {
             if (big_endian_) {
@@ -71,7 +71,7 @@ std::vector<uint8_t> WagoNetVarComponent::pack_value(const VarDef &var, const st
 }
 
 void WagoNetVarComponent::setup() {
-    ESP_LOGI("wagonetvar", "Inicjalizacja komponentu WagoNetVar (COB-ID: %d, Checksum: %d)", cob_id_, checksum_);
+    ESP_LOGI("wago_netvar", "Inicjalizacja komponentu WagoNetVar (COB-ID: %d, Checksum: %d)", cob_id_, checksum_);
     udp_.begin(port_);
 }
 
@@ -119,7 +119,6 @@ void WagoNetVarComponent::update() {
         payload.push_back(current_bool_byte);
     }
 
-    // Nagłówek CoDeSys v2.3
     uint8_t header[20] = {0};
     header[0] = 0x00; header[1] = 0x2D; header[2] = 0x53; header[3] = 0x33;
     
@@ -137,7 +136,7 @@ void WagoNetVarComponent::update() {
 
     write_u16(&header[8], cob_id_);
     write_u16(&header[12], checksum_);
-    write_u16($header[14], total_len);
+    write_u16(&header[14], total_len);
     write_u16(&header[16], sequence_counter_);
     sequence_counter_++;
 
@@ -152,5 +151,5 @@ void WagoNetVarComponent::update() {
     udp_.endPacket();
 }
 
-} // namespace wagonetvar
+} // namespace wago_netvar
 } // namespace esphome
