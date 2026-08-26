@@ -94,8 +94,8 @@ uint16_t WagoNetVarComponent::read_u16(const uint8_t *ptr) {
 }
 
 void WagoNetVarComponent::setup() {
-    ESP_LOGI(TAG, "Start NetVar [Target IP: %s, COB-ID: %d, Port: %d, Read: %s, Write: %s]", 
-             ip_address_.c_str(), cob_id_, port_, enable_read_ ? "TAK" : "NIE", enable_write_ ? "TAK" : "NIE");
+    ESP_LOGI(TAG, "Start NetVar [Target IP: %s, COB-ID: %d, Port: %d, Read: %s, Write: %s, Alignment: %s]", 
+             ip_address_.c_str(), cob_id_, port_, enable_read_ ? "TAK" : "NIE", enable_write_ ? "TAK" : "NIE", alignment_ ? "TAK" : "NIE");
     
     if (enable_read_) {
         udp_.begin(port_);
