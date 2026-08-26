@@ -37,16 +37,17 @@ CONFIG_SCHEMA = cv.polling_component_schema('1s').extend({
 })
 
 async def to_code(config):
-     var = cg.new_variable(config[CONF_ID])
-     await cg.register_component(var, config)
+    # W nowym ESPHome new_variable wymaga podania obiektu klasy jako drugiego argumentu
+    var = cg.new_variable(config[CONF_ID], WagoNetVarComponent())
+    await cg.register_component(var, config)
 
-     cg.add(var.set_ip(str(config[CONF_IP])))
-     cg.add(var.set_port(config[CONF_PORT]))
-     cg.add(var.set_cob_id(config[CONF_COB_ID]))
-     cg.add(var.set_checksum(config[CONF_CHECKSUM]))
-     cg.add(var.set_big_endian(config[CONF_ENDIAN] == 'big'))
-     cg.add(var.set_pack_bools(config[CONF_PACK_BOOLS]))
-     cg.add(var.set_alignment(config[CONF_ALIGNMENT]))
+    cg.add(var.set_ip(str(config[CONF_IP])))
+    cg.add(var.set_port(config[CONF_PORT]))
+    cg.add(var.set_cob_id(config[CONF_COB_ID]))
+    cg.add(var.set_checksum(config[CONF_CHECKSUM]))
+    cg.add(var.set_big_endian(config[CONF_ENDIAN] == 'big'))
+    cg.add(var.set_pack_bools(config[CONF_PACK_BOOLS]))
+    cg.add(var.set_alignment(config[CONF_ALIGNMENT]))
 
-     for v in config[CONF_VARIABLES]:
-         cg.add(var.add_variable(v[CONF_VAR_NAME], v[CONF_VAR_TYPE]))
+    for v in config[CONF_VARIABLES]:
+        cg.add(var.add_variable(v[CONF_VAR_NAME], v[CONF_VAR_TYPE]))
