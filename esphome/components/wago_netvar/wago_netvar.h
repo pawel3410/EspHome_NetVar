@@ -14,7 +14,6 @@ struct VarDef {
     std::string type;
     size_t size;
     size_t align;
-    std::string raw_value = "0"; // Przechowywana wartość (domyślnie "0")
 };
 
 class WagoNetVarComponent : public PollingComponent {
@@ -29,9 +28,13 @@ public:
 
     void add_variable(const std::string &name, const std::string &type);
     
-    // Metody do aktualizacji wartości danej zmiennej po nazwie (np. dla lambdy z czujnika)
+    // Przeładowane metody wprowadzania wartości dla wszystkich typów
     void set_variable_value(const std::string &name, float value);
+    void set_variable_value(const std::string &name, double value);
     void set_variable_value(const std::string &name, bool value);
+    void set_variable_value(const std::string &name, int value);
+    void set_variable_value(const std::string &name, uint32_t value);
+    void set_variable_value(const std::string &name, const std::string &value);
 
     void setup() override;
     void update() override;
