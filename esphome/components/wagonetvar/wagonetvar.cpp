@@ -2,7 +2,7 @@
 #include <cmath>
 
 namespace esphome {
-namespace wagonetvar {
+namespace wago_netvar {
 
 void WagoNetVarComponent::add_variable(const std::string &name, const std::string &type) {
     size_t size = 1;
@@ -150,5 +150,5 @@ void WagoNetVarComponent::update() {
     udp_.endPacket();
 }
 
-} // namespace wagonetvar
+} // namespace wago_netvar
 } // namespace esphome
