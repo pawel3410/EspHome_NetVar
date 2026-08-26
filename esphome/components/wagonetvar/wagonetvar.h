@@ -7,7 +7,7 @@
 #include <map>
 
 namespace esphome {
-namespace wagonetvar {
+namespace wago_netvar {
 
 struct VarDef {
     std::string name;
@@ -54,5 +54,5 @@ private:
     std::vector<uint8_t> pack_value(const VarDef &var, const std::string &val_str);
 };
 
-} // namespace wagonetvar
+} // namespace wago_netvar
 } // namespace esphome
