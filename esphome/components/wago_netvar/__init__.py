@@ -37,8 +37,8 @@ CONFIG_SCHEMA = cv.polling_component_schema('1s').extend({
 })
 
 async def to_code(config):
-    # Prawidłowy zapis z konstruktorem dla Pvariable w nowym ESPHome
-    var = cg.Pvariable(config[CONF_ID], WagoNetVarComponent())
+    # Magiczne .new() rozwiązuje problem brakującego wskaźnika w C++!
+    var = cg.Pvariable(config[CONF_ID], WagoNetVarComponent.new())
     await cg.register_component(var, config)
 
     cg.add(var.set_ip(str(config[CONF_IP])))
