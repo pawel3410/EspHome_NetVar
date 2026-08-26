@@ -5,8 +5,9 @@ from esphome.const import CONF_ID, CONF_IP, CONF_PORT, CONF_UPDATE_INTERVAL
 DEPENDENCIES = ['network']
 AUTO_LOAD = []
 
-wagonetvar_ns = cg.esphome_ns.namespace('wagonetvar')
-WagoNetVarComponent = wagonetvar_ns.class_('WagoNetVarComponent', cg.PollingComponent)
+# Zmiana na wago_netvar, aby pasowało do nazwy w YAML
+wago_netvar_ns = cg.esphome_ns.namespace('wago_netvar')
+WagoNetVarComponent = wago_netvar_ns.class_('WagoNetVarComponent', cg.PollingComponent)
 
 CONF_COB_ID = 'cob_id'
 CONF_CHECKSUM = 'checksum'
