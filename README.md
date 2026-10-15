@@ -16,9 +16,9 @@ Komponent wykorzystuje płaskie buforowanie pamięci oraz blokowy zrzut pakietó
 | **`list_ID`** | Integer | `1` | Identyfikator listy zmiennych sieciowych (`list_ID` / NetVar ID w CoDeSys). |
 | **`var_count`** | Integer | `0` | Liczba zmiennych w ramce (0 = brak weryfikacji liczby). |
 | **`direction`** | String | `"write"` | Kierunek komunikacji: `"read"`, `"write"` lub `"both"`. |
-| **`endian`** | String | `"little"` | Kolejność bajtów: `"little"` (np. ESP32) lub `"big"` (standard CoDeSys/Wago). |
-| **`pack_bools`** | Boolean | `false` | Czy pakować zmienne typu `BOOL` bitowo w bajtach (zgodnie z CoDeSys). |
-| **`alignment`** | Boolean | `true` | Wyrównanie pamięci (alignment) do rozmiaru typów. |
+| **`endian`** | String | `"little"` | Kolejność bajtów: `"little"` (domyślnie dla CoDeSys) lub `"big"`. |
+| **`pack_bools`** | Boolean | `false` | Czy pakować zmienne typu `BOOL` bitowo w bajtach. |
+| **`alignment`** | Boolean | `false` | Wyrównanie pamięci (alignment) do rozmiaru typów. |
 | **`update_interval`** | Time | `"10s"` | Cykliczny interwał wysyłania pełnej ramki (heartbeat / stały czas). |
 | **`send_on_change`** | Boolean | `false` | Czy wysyłać ramkę natychmiast po zmianie wartości zmiennej. |
 | **`min_interval`** | Time | `"100ms"` | Minimalny czas odstępu między ramkami przy włączonym `send_on_change`. |
@@ -27,6 +27,24 @@ Komponent wykorzystuje płaskie buforowanie pamięci oraz blokowy zrzut pakietó
 | **`binary_sensors`** | List | Opcjonalne | Mappowanie zmiennych binarnych na czujniki binarne (`binary_sensor`). |
 | **`switches`** | List | Opcjonalne | Mappowanie zmiennych na przełączniki (`switch`). |
 | **`numbers`** | List | Opcjonalne | Mappowanie zmiennych na slidery/wprowadzanie liczbowe (`number`). |
+
+---
+
+## 📦 Struktura Ramki NetVar (UDP Packet Layout)
+
+Każda ramka UDP wysyłana lub odbierana przez komponent składa się z **20-bajtowego nagłówka** oraz następującego po nim bloku danych (**payload**):
+
+| Offset (bajty) | Rozmiar | Pole | Opis / Wartość |
+| --- | --- | --- | --- |
+| `0 - 3` | 4 bajty | Magic Bytes | Stała nagłówka protokołu: `0x00, 0x2D, 0x53, 0x33` |
+| `4 - 7` | 4 bajty | Reserved | Zarezerwowane / wypełnione zerami |
+| `8 - 9` | 2 bajty | `list_ID` | Identyfikator listy zmiennych sieciowych |
+| `10 - 11` | 2 bajty | Reserved | Zarezerwowane / wypełnione zerami |
+| `12 - 13` | 2 bajty | `var_count` | Liczba zmiennych w pakiecie |
+| `14 - 15` | 2 bajty | Total Length | Całkowity rozmiar ramki w bajtach (`20 + payload_size_`) |
+| `16 - 17` | 2 bajty | Sequence Counter | Licznik sekwencji pakietów (automatycznie inkrementowany) |
+| `18 - 19` | 2 bajty | Reserved | Zarezerwowane / wypełnione zerami |
+| `20+` | Zmienna | Payload | Ciągły blok danych zmiennych (zgodny z ustawieniami `endian` i `alignment`) |
 
 ---
 
@@ -43,9 +61,7 @@ Komponent wykorzystuje płaskie buforowanie pamięci oraz blokowy zrzut pakietó
 
 ## 📚 Przykłady Użycia
 
-### Przykład 1: Podstawowa konfiguracja (Wysyłanie cykliczne)
-
-Standardowa konfiguracja wysyłająca pełny stan bufora co określony czas (`update_interval`), sterująca wyjściami i przesyłająca wartości do sterownika Wago.
+### Przykład 1: Podstawowa konfiguracja (Little Endian, domyślne parametry)
 
 ```yaml
 esphome:
@@ -85,9 +101,7 @@ wago_netvar:
 
 ---
 
-### Przykład 2: Zaawansowana konfiguracja (Wysyłanie po zmianie stanu + Heartbeat)
-
-Konfiguracja z włączonym natychmiastowym wysyłaniem po zmianie wartości w Home Assistant (`send_on_change: true`) z ograniczeniem minimalnego czasu między pakietami (`min_interval: 200ms`), przy jednoczesnym zachowaniu cyklicznego odświeżania co 10 sekund.
+### Przykład 2: Zaawansowana konfiguracja (`send_on_change` + Heartbeat)
 
 ```yaml
 wago_netvar:
@@ -96,11 +110,11 @@ wago_netvar:
   list_ID: 2
   var_count: 5
   direction: "both"
-  endian: "big"
-  pack_bools: true
-  alignment: true
+  endian: "little"
+  pack_bools: false
+  alignment: false
   
-  update_interval: 10s       # Okokresowy heartbeat (stały interwał)
+  update_interval: 10s       # Cykliczny heartbeat
   send_on_change: true       # Wysyłaj natychmiast po zmianie
   min_interval: 200ms        # Antyflood dla trybu on_change
   
@@ -134,85 +148,3 @@ wago_netvar:
       unit_of_measurement: "m³/h"
 
 ```
-
----
-
-### Przykład 3: Monitorowanie (Tylko odczyt ze sterownika PLC)
-
-Konfiguracja nastawiona wyłącznie na odbiór danych z PLC (`direction: read`), z określeniem częstotliwości sprawdzania/odświeżania przez `update_interval`.
-
-```yaml
-wago_netvar:
-  ip_address: "192.168.1.100"
-  port: 1202
-  list_ID: 10
-  direction: "read"
-  update_interval: 2s
-  
-  variables:
-    - name: "Weather_Temp"
-      type: "REAL"
-    - name: "Weather_Wind"
-      type: "REAL"
-    - name: "Is_Raining"
-      type: "BOOL"
-    - name: "System_Message"
-      type: "STRING(40)"
-
-  sensors:
-    - variable: "Weather_Temp"
-      name: "Pogoda - Temperatura"
-      unit_of_measurement: "°C"
-    - variable: "Weather_Wind"
-      name: "Pogoda - Wiatr"
-      unit_of_measurement: "km/h"
-
-  binary_sensors:
-    - variable: "Is_Raining"
-      name: "Czujnik Deszczu"
-      device_class: moisture
-
-```
-
----
-
-### Przykład 4: Zaawansowane typy danych (LREAL, SINT, TIME, STRING)
-
-Przykład demonstrujący obsługę pełnego wachlarza typów liczbowych oraz ciągów znaków.
-
-```yaml
-wago_netvar:
-  ip_address: "192.168.1.15"
-  port: 1202
-  list_ID: 5
-  direction: "both"
-  update_interval: 5s
-  
-  variables:
-    - name: "PreciseValue"
-      type: "LREAL"     # 64-bit float
-    - name: "SmallInt"
-      type: "SINT"      # -128 do 127
-    - name: "CycleTime"
-      type: "TIME"      # Czas w ms
-    - name: "DeviceName"
-      type: "STRING(25)"
-
-  sensors:
-    - variable: "PreciseValue"
-      name: "Wartość Precyzyjna"
-    - variable: "SmallInt"
-      name: "Mała Liczba"
-    - variable: "CycleTime"
-      name: "Czas Cyklu PLC"
-      unit_of_measurement: "ms"
-
-```
-
----
-
-## 🛠️ Wskazówki konfiguracji w CoDeSys / Wago e!Cockpit
-
-1. W projekcie PLC utwórz **Network Variables List (Sender/Receiver)** odpowiadającą kierunkiem konfiguracji w ESPHome.
-2. Upewnij się, że **NetVar ID** (`list_ID`) oraz **Port UDP** po stronie PLC są dokładnie takie same jak w pliku konfiguracyjnym ESPHome YAML.
-3. Jeśli używasz struktur lub tablic zmiennych z `pack_bools: true`, pamiętaj o wyrównaniu pamięci w CoDeSys (struktury mogą wymagać atrybutu `ALIGN` lub odpowiedniej kolejności pól).
