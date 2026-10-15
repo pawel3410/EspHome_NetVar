@@ -43,6 +43,8 @@ void WagoNumber::control(float value) {
 #endif
 
 void WagoNetVarComponent::get_type_info(const std::string &type, size_t &size, size_t &align) {
+    size = 0;
+    align = 1;
     if (type == "BOOL") { size = 1; align = 1; }
     else if (type == "BYTE" || type == "USINT" || type == "SINT") { size = 1; align = 1; }
     else if (type == "WORD" || type == "UINT" || type == "INT") { size = 2; align = 2; }
@@ -66,6 +68,10 @@ void WagoNetVarComponent::add_variable(const std::string &name, const std::strin
     v.name = name;
     v.type = type;
     get_type_info(type, v.size, v.align);
+    if (v.size == 0) {
+        ESP_LOGE(TAG, "Nieznany lub nieobsługiwany typ zmiennej: %s dla zmiennej %s", type.c_str(), name.c_str());
+        return;
+    }
     variables_.push_back(v);
 }
 
@@ -80,7 +86,6 @@ void WagoNetVarComponent::setup() {
     ESP_LOGI(TAG, "Start NetVar [Target IP: %s, COB-ID: %d, Port: %d, Direction: %s, Alignment: %s]", 
              ip_address_.c_str(), cob_id_, port_, direction_.c_str(), alignment_ ? "TAK" : "NIE");
     
-    // Obliczanie stałych offsetów w pamięci tylko jeden raz!
     size_t offset = 0;
     uint8_t bool_bit_index = 0;
 
@@ -112,10 +117,9 @@ void WagoNetVarComponent::setup() {
     
     payload_size_ = offset;
     
-    // Przydzielenie ciągłego bloku pamięci dla stanu
     tx_buffer_.resize(payload_size_, 0);
     rx_buffer_.resize(payload_size_, 0);
-    rx_packet_buffer_.resize(1500, 0); // Bufor prealokowany zapobiega fragmentacji sterty (heap) w trakcie loop()
+    rx_packet_buffer_.resize(1500, 0);
 
     udp_.begin(port_);
 }
@@ -128,11 +132,7 @@ void WagoNetVarComponent::set_variable_value(const std::string &name, bool value
     uint8_t old_byte = tx_buffer_[var->byte_offset];
     uint8_t new_byte = value ? (old_byte | mask) : (old_byte & ~mask);
     
-    if (old_byte != new_byte) {
-        tx_buffer_[var->byte_offset] = new_byte;
-        is_dirty_ = true;
-        trigger_send_();
-    }
+    tx_buffer_[var->byte_offset] = new_byte;
 }
 
 void WagoNetVarComponent::set_variable_value(const std::string &name, float value) {
@@ -154,16 +154,8 @@ void WagoNetVarComponent::set_variable_value(const std::string &name, float valu
         write_bytes(temp.data(), static_cast<uint64_t>(val_i), var->size, big_endian_);
     }
 
-    bool changed = false;
     for (size_t i = 0; i < var->size; i++) {
-        if (tx_buffer_[var->byte_offset + i] != temp[i]) {
-            tx_buffer_[var->byte_offset + i] = temp[i];
-            changed = true;
-        }
-    }
-    if (changed) {
-        is_dirty_ = true;
-        trigger_send_();
+        tx_buffer_[var->byte_offset + i] = temp[i];
     }
 }
 
@@ -174,16 +166,8 @@ void WagoNetVarComponent::set_variable_value(const std::string &name, int value)
     std::vector<uint8_t> temp(var->size, 0);
     write_bytes(temp.data(), static_cast<uint64_t>(value), var->size, big_endian_);
     
-    bool changed = false;
     for (size_t i = 0; i < var->size; i++) {
-        if (tx_buffer_[var->byte_offset + i] != temp[i]) {
-            tx_buffer_[var->byte_offset + i] = temp[i];
-            changed = true;
-        }
-    }
-    if (changed) {
-        is_dirty_ = true;
-        trigger_send_();
+        tx_buffer_[var->byte_offset + i] = temp[i];
     }
 }
 
@@ -197,16 +181,8 @@ void WagoNetVarComponent::set_variable_value(const std::string &name, const std:
             temp[i] = (i < value.length() && i < var->size - 1) ? value[i] : 0x00;
         }
 
-        bool changed = false;
         for (size_t i = 0; i < var->size; i++) {
-            if (tx_buffer_[var->byte_offset + i] != temp[i]) {
-                tx_buffer_[var->byte_offset + i] = temp[i];
-                changed = true;
-            }
-        }
-        if (changed) {
-            is_dirty_ = true;
-            trigger_send_();
+            tx_buffer_[var->byte_offset + i] = temp[i];
         }
     } else if (var->type == "BOOL") {
         set_variable_value(name, (value == "1" || value == "true" || value == "True"));
@@ -242,15 +218,8 @@ std::string WagoNetVarComponent::get_variable_value(const std::string &name) {
     }
 }
 
-void WagoNetVarComponent::trigger_send_() {
-    if (!enable_write_ || !send_on_change_) return;
-    uint32_t now = millis();
-    if (now - last_sent_time_ >= min_interval_ms_) {
-        send_packet_();
-    }
-}
-
 void WagoNetVarComponent::loop() {
+    // 1. Obsługa odczytu przychodzących ramek UDP
     if (enable_read_) {
         int packet_size = udp_.parsePacket();
         if (packet_size > 0) {
@@ -273,7 +242,8 @@ void WagoNetVarComponent::loop() {
         }
     }
 
-    if (enable_write_ && is_dirty_) {
+    // 2. Cykliczne wysyłanie pakietu wyłącznie po upływie zadanego czasu (min_interval)
+    if (enable_write_) {
         uint32_t now = millis();
         if (now - last_sent_time_ >= min_interval_ms_) {
             send_packet_();
@@ -282,18 +252,15 @@ void WagoNetVarComponent::loop() {
 }
 
 void WagoNetVarComponent::update() {
-    if (enable_write_) {
-        send_packet_();
-    }
+    // Nieużywane – wysyłanie cykliczne w pełni obsługiwane w pętli loop() w oparciu o min_interval
 }
 
 void WagoNetVarComponent::unpack_payload(const uint8_t *payload, size_t len) {
-    if (len < payload_size_) return; // Ramka jest za krótka
+    if (len < payload_size_) return;
 
     for (auto &var : variables_) {
         bool changed = false;
         
-        // Zjawisko zmiany parsujemy tylko poprzez bitowe porównanie z poprzednią wartością (błyskawiczne)
         if (var.type == "BOOL") {
             uint8_t mask = 1 << var.bit_offset;
             if ((rx_buffer_[var.byte_offset] & mask) != (payload[var.byte_offset] & mask)) changed = true;
@@ -302,7 +269,6 @@ void WagoNetVarComponent::unpack_payload(const uint8_t *payload, size_t len) {
         }
 
         if (changed || !first_rx_done_) {
-            // Synchronizujemy lokalne bufory (stan TX oraz RX) by zgrać stan HA z Wago/Codesys
             if (var.type == "BOOL") {
                 if (payload[var.byte_offset] & (1 << var.bit_offset)) {
                     rx_buffer_[var.byte_offset] |= (1 << var.bit_offset);
@@ -316,7 +282,6 @@ void WagoNetVarComponent::unpack_payload(const uint8_t *payload, size_t len) {
                 std::memcpy(&tx_buffer_[var.byte_offset], &payload[var.byte_offset], var.size);
             }
 
-            // Rozsyłanie wydarzeń do ESPHome tylko gdy nastąpiła zmiana
             if (var.type == "BOOL") {
                 bool val = (payload[var.byte_offset] >> var.bit_offset) & 0x01;
 #ifdef USE_BINARY_SENSOR
@@ -344,7 +309,7 @@ void WagoNetVarComponent::unpack_payload(const uint8_t *payload, size_t len) {
 #ifdef USE_NUMBER
                 if (var.number_ptr) var.number_ptr->publish_state(f);
 #endif
-            } else if (var.type.rfind("STRING", 0) != 0) { // Obsługa całkowitych
+            } else if (var.type.rfind("STRING", 0) != 0) {
                 int64_t val_i = static_cast<int64_t>(read_bytes(&payload[var.byte_offset], var.size, big_endian_));
                 if (var.type == "SINT") val_i = static_cast<int8_t>(val_i);
                 else if (var.type == "INT") val_i = static_cast<int16_t>(val_i);
@@ -384,12 +349,11 @@ void WagoNetVarComponent::send_packet_() {
 
     if (udp_.beginPacket(target_ip, port_)) {
         udp_.write(header, 20);
-        udp_.write(tx_buffer_.data(), payload_size_); // Zrzut blokowy! 100x szybsze niż loopowanie zmiennych.
+        udp_.write(tx_buffer_.data(), payload_size_);
         udp_.endPacket();
     }
 
     last_sent_time_ = millis();
-    is_dirty_ = false;
 }
 
 } // namespace wago_netvar
