@@ -74,8 +74,8 @@ class WagoNetVarComponent : public PollingComponent {
 public:
     void set_ip_address(const std::string &ip) { ip_address_ = ip; }
     void set_port(uint16_t port) { port_ = port; }
-    void set_cob_id(uint16_t cob_id) { cob_id_ = cob_id; }
-    void set_checksum(uint16_t checksum) { checksum_ = checksum; }
+    void set_list_id(uint16_t list_id) { list_id_ = list_id; }
+    void set_var_count(uint16_t var_count) { var_count_ = var_count; }
 
     void set_direction(const std::string &direction) {
         direction_ = direction;
@@ -131,8 +131,8 @@ public:
 private:
     std::string ip_address_;
     uint16_t port_{1202};
-    uint16_t cob_id_{1};
-    uint16_t checksum_{0};
+    uint16_t list_id_{1};
+    uint16_t var_count_{0};
     std::string direction_{"write"};
 
     bool enable_read_{false};
