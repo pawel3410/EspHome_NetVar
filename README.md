@@ -1,10 +1,6 @@
-Oto szczegółowy plik **`README.md`** dla Twojego komponentu ESPHome `wago_netvar`, zawierający pełną dokumentację, opis parametrów, obsługiwane typy oraz bogaty zestaw przykładów konfiguracyjnych.
-
----
-
 # ESPHome Wago NetVar Component
 
-Komponent niestandardowy dla **ESPHome** umożliwiający szybką, dwukierunkową komunikację z sterownikami PLC firmy **Wago** oraz środowiskiem **CoDeSys** przy użyciu protokołu zmiennych sieciowych (**NetVar over UDP**).
+Komponent niestandardowy dla **ESPHome** umożliwiający szybką, dwukierunkową komunikację ze sterownikami PLC firmy **Wago** oraz środowiskiem **CoDeSys** przy użyciu protokołu zmiennych sieciowych (**NetVar over UDP**).
 
 Komponent wykorzystuje płaskie buforowanie pamięci oraz blokowy zrzut pakietów, co zapewnia maksymalną wydajność i minimalizuje narzut na procesor ESP32/ESP8266.
 
@@ -23,7 +19,9 @@ Komponent wykorzystuje płaskie buforowanie pamięci oraz blokowy zrzut pakietó
 | **`endian`** | String | `"little"` | Kolejność bajtów: `"little"` (np. ESP32) lub `"big"` (standard CoDeSys/Wago). |
 | **`pack_bools`** | Boolean | `false` | Czy pakować zmienne typu `BOOL` bitowo w bajtach (zgodnie z CoDeSys). |
 | **`alignment`** | Boolean | `true` | Wyrównanie pamięci (alignment) do rozmiaru typów. |
-| **`min_interval`** | Time | `"100ms"` | Interwał czasowy cyklicznego wysyłania/odświeżania pakietów UDP. |
+| **`update_interval`** | Time | `"10s"` | Cykliczny interwał wysyłania pełnej ramki (heartbeat / stały czas). |
+| **`send_on_change`** | Boolean | `false` | Czy wysyłać ramkę natychmiast po zmianie wartości zmiennej. |
+| **`min_interval`** | Time | `"100ms"` | Minimalny czas odstępu między ramkami przy włączonym `send_on_change`. |
 | **`variables`** | List | Opcjonalne | Lista definicji zmiennych (nazwa i typ IEC 61131-3). |
 | **`sensors`** | List | Opcjonalne | Mappowanie zmiennych numerycznych na czujniki ESPHome (`sensor`). |
 | **`binary_sensors`** | List | Opcjonalne | Mappowanie zmiennych binarnych na czujniki binarne (`binary_sensor`). |
@@ -45,9 +43,9 @@ Komponent wykorzystuje płaskie buforowanie pamięci oraz blokowy zrzut pakietó
 
 ## 📚 Przykłady Użycia
 
-### Przykład 1: Podstawowa konfiguracja (Zapis do sterownika, Little Endian)
+### Przykład 1: Podstawowa konfiguracja (Wysyłanie cykliczne)
 
-Najprostszy przykład sterowania wyjściami i przesyłania prostych wartości do sterownika Wago z interwałem cyklicznym co 1 sekundę.
+Standardowa konfiguracja wysyłająca pełny stan bufora co określony czas (`update_interval`), sterująca wyjściami i przesyłająca wartości do sterownika Wago.
 
 ```yaml
 esphome:
@@ -67,7 +65,7 @@ wago_netvar:
   port: 1202
   list_ID: 1
   direction: "write"
-  min_interval: 1s
+  update_interval: 5s
   variables:
     - name: "bLamp1"
       type: "BOOL"
@@ -87,32 +85,30 @@ wago_netvar:
 
 ---
 
-### Przykład 2: Komunikacja dwukierunkowa (Big Endian, Pakowanie Bitek, Odczyt i Zapis)
+### Przykład 2: Zaawansowana konfiguracja (Wysyłanie po zmianie stanu + Heartbeat)
 
-Standardowa konfiguracja dla sterowników Wago/CoDeSys, gdzie wymagany jest big-endian, pakowanie zmiennych `BOOL` w bajty (`pack_bools: true`) oraz jednoczesny odczyt i zapis (`direction: both`).
+Konfiguracja z włączonym natychmiastowym wysyłaniem po zmianie wartości w Home Assistant (`send_on_change: true`) z ograniczeniem minimalnego czasu między pakietami (`min_interval: 200ms`), przy jednoczesnym zachowaniu cyklicznego odświeżania co 10 sekund.
 
 ```yaml
 wago_netvar:
   ip_address: "192.168.1.50"
   port: 1202
   list_ID: 2
-  var_count: 6
+  var_count: 5
   direction: "both"
   endian: "big"
   pack_bools: true
   alignment: true
-  min_interval: 500ms
+  
+  update_interval: 10s       # Okokresowy heartbeat (stały interwał)
+  send_on_change: true       # Wysyłaj natychmiast po zmianie
+  min_interval: 200ms        # Antyflood dla trybu on_change
   
   variables:
-    # Bity spakowane w jeden bajt
     - name: "Status_Pump1"
       type: "BOOL"
     - name: "Cmd_Pump1"
       type: "BOOL"
-    - name: "Status_Valve"
-      type: "BOOL"
-      
-    # Zmienne numeryczne
     - name: "Actual_Temp"
       type: "REAL"
     - name: "Flow_Rate"
@@ -123,8 +119,6 @@ wago_netvar:
   binary_sensors:
     - variable: "Status_Pump1"
       name: "Pompa 1 - Status"
-    - variable: "Status_Valve"
-      name: "Zawór - Status"
 
   switches:
     - variable: "Cmd_Pump1"
@@ -138,9 +132,6 @@ wago_netvar:
     - variable: "Flow_Rate"
       name: "Przepływ"
       unit_of_measurement: "m³/h"
-    - variable: "Operating_Hours"
-      name: "Czas Pracy"
-      unit_of_measurement: "h"
 
 ```
 
@@ -148,7 +139,7 @@ wago_netvar:
 
 ### Przykład 3: Monitorowanie (Tylko odczyt ze sterownika PLC)
 
-Konfiguracja nastawiona wyłącznie na odbiór danych z PLC (`direction: read`), idealna do wizualizacji parametrów maszyn lub stacji pogodowej na sterowniku Wago bez wysyłania komend sterujących z Home Assistant.
+Konfiguracja nastawiona wyłącznie na odbiór danych z PLC (`direction: read`), z określeniem częstotliwości sprawdzania/odświeżania przez `update_interval`.
 
 ```yaml
 wago_netvar:
@@ -156,7 +147,7 @@ wago_netvar:
   port: 1202
   list_ID: 10
   direction: "read"
-  min_interval: 2s
+  update_interval: 2s
   
   variables:
     - name: "Weather_Temp"
@@ -195,7 +186,7 @@ wago_netvar:
   port: 1202
   list_ID: 5
   direction: "both"
-  min_interval: 1s
+  update_interval: 5s
   
   variables:
     - name: "PreciseValue"
