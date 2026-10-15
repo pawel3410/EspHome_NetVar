@@ -139,7 +139,7 @@ private:
     bool enable_write_{true};
     bool big_endian_{false};
     bool pack_bools_{false};
-    bool alignment_{true};
+    bool alignment_{false};
 
     bool send_on_change_{false};
     uint32_t min_interval_ms_{100};
