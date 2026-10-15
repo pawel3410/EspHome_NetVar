@@ -141,9 +141,10 @@ private:
     bool pack_bools_{false};
     bool alignment_{true};
 
-    bool send_on_change_{true};
+    bool send_on_change_{false};
     uint32_t min_interval_ms_{100};
     uint32_t last_sent_time_{0};
+    bool is_dirty_{false};
     bool first_rx_done_{false};
 
     WiFiUDP udp_;
@@ -156,6 +157,7 @@ private:
 
     uint16_t sequence_counter_{1};
 
+    void trigger_send_();
     void send_packet_();
     void get_type_info(const std::string &type, size_t &size, size_t &align);
     void unpack_payload(const uint8_t *payload, size_t len);
