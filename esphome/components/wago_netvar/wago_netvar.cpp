@@ -83,8 +83,8 @@ VarDef* WagoNetVarComponent::get_var(const std::string &name) {
 }
 
 void WagoNetVarComponent::setup() {
-    ESP_LOGI(TAG, "Start NetVar [Target IP: %s, list_ID: %d, Var Count: %d, Port: %d, Direction: %s, Alignment: %s]", 
-             ip_address_.c_str(), list_id_, var_count_, port_, direction_.c_str(), alignment_ ? "TAK" : "NIE");
+    ESP_LOGI(TAG, "Start NetVar [Target IP: %s, list_ID: %d, Var Count: %d, Port: %d, Direction: %s, Alignment: %s, Send on Change: %s]", 
+             ip_address_.c_str(), list_id_, var_count_, port_, direction_.c_str(), alignment_ ? "TAK" : "NIE", send_on_change_ ? "TAK" : "NIE");
     
     size_t offset = 0;
     uint8_t bool_bit_index = 0;
@@ -132,7 +132,13 @@ void WagoNetVarComponent::set_variable_value(const std::string &name, bool value
     uint8_t old_byte = tx_buffer_[var->byte_offset];
     uint8_t new_byte = value ? (old_byte | mask) : (old_byte & ~mask);
     
-    tx_buffer_[var->byte_offset] = new_byte;
+    if (old_byte != new_byte) {
+        tx_buffer_[var->byte_offset] = new_byte;
+        if (send_on_change_) {
+            is_dirty_ = true;
+            trigger_send_();
+        }
+    }
 }
 
 void WagoNetVarComponent::set_variable_value(const std::string &name, float value) {
@@ -154,8 +160,16 @@ void WagoNetVarComponent::set_variable_value(const std::string &name, float valu
         write_bytes(temp.data(), static_cast<uint64_t>(val_i), var->size, big_endian_);
     }
 
+    bool changed = false;
     for (size_t i = 0; i < var->size; i++) {
-        tx_buffer_[var->byte_offset + i] = temp[i];
+        if (tx_buffer_[var->byte_offset + i] != temp[i]) {
+            tx_buffer_[var->byte_offset + i] = temp[i];
+            changed = true;
+        }
+    }
+    if (changed && send_on_change_) {
+        is_dirty_ = true;
+        trigger_send_();
     }
 }
 
@@ -166,8 +180,16 @@ void WagoNetVarComponent::set_variable_value(const std::string &name, int value)
     std::vector<uint8_t> temp(var->size, 0);
     write_bytes(temp.data(), static_cast<uint64_t>(value), var->size, big_endian_);
     
+    bool changed = false;
     for (size_t i = 0; i < var->size; i++) {
-        tx_buffer_[var->byte_offset + i] = temp[i];
+        if (tx_buffer_[var->byte_offset + i] != temp[i]) {
+            tx_buffer_[var->byte_offset + i] = temp[i];
+            changed = true;
+        }
+    }
+    if (changed && send_on_change_) {
+        is_dirty_ = true;
+        trigger_send_();
     }
 }
 
@@ -181,8 +203,16 @@ void WagoNetVarComponent::set_variable_value(const std::string &name, const std:
             temp[i] = (i < value.length() && i < var->size - 1) ? value[i] : 0x00;
         }
 
+        bool changed = false;
         for (size_t i = 0; i < var->size; i++) {
-            tx_buffer_[var->byte_offset + i] = temp[i];
+            if (tx_buffer_[var->byte_offset + i] != temp[i]) {
+                tx_buffer_[var->byte_offset + i] = temp[i];
+                changed = true;
+            }
+        }
+        if (changed && send_on_change_) {
+            is_dirty_ = true;
+            trigger_send_();
         }
     } else if (var->type == "BOOL") {
         set_variable_value(name, (value == "1" || value == "true" || value == "True"));
@@ -218,7 +248,16 @@ std::string WagoNetVarComponent::get_variable_value(const std::string &name) {
     }
 }
 
+void WagoNetVarComponent::trigger_send_() {
+    if (!enable_write_ || !send_on_change_) return;
+    uint32_t now = millis();
+    if (now - last_sent_time_ >= min_interval_ms_) {
+        send_packet_();
+    }
+}
+
 void WagoNetVarComponent::loop() {
+    // 1. Obsługa odczytu przychodzących ramek UDP
     if (enable_read_) {
         int packet_size = udp_.parsePacket();
         if (packet_size > 0) {
@@ -241,7 +280,8 @@ void WagoNetVarComponent::loop() {
         }
     }
 
-    if (enable_write_) {
+    // 2. Obsługa kolejkowania wysyłania po zmianie z zachowaniem minimalnego interwału
+    if (enable_write_ && send_on_change_ && is_dirty_) {
         uint32_t now = millis();
         if (now - last_sent_time_ >= min_interval_ms_) {
             send_packet_();
@@ -249,7 +289,12 @@ void WagoNetVarComponent::loop() {
     }
 }
 
-void WagoNetVarComponent::update() {}
+void WagoNetVarComponent::update() {
+    // Cykliczne wysyłanie pakietu (heartbeat / stały interwał określony przez update_interval w YAML)
+    if (enable_write_) {
+        send_packet_();
+    }
+}
 
 void WagoNetVarComponent::unpack_payload(const uint8_t *payload, size_t len) {
     if (len < payload_size_) return;
@@ -350,6 +395,7 @@ void WagoNetVarComponent::send_packet_() {
     }
 
     last_sent_time_ = millis();
+    is_dirty_ = false;
 }
 
 } // namespace wago_netvar
