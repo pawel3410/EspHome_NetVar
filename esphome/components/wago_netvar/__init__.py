@@ -16,8 +16,8 @@ WagoNetVarComponent = wago_netvar_ns.class_(
 WagoSwitch = wago_netvar_ns.class_("WagoSwitch", switch.Switch)
 WagoNumber = wago_netvar_ns.class_("WagoNumber", number.Number)
 
-CONF_COB_ID = "cob_id"
-CONF_CHECKSUM = "checksum"
+CONF_LIST_ID = "list_ID"
+CONF_VAR_COUNT = "var_count"
 CONF_DIRECTION = "direction"
 CONF_ENDIAN = "endian"
 CONF_PACK_BOOLS = "pack_bools"
@@ -71,8 +71,8 @@ CONFIG_SCHEMA = (
             cv.GenerateID(): cv.declare_id(WagoNetVarComponent),
             cv.Required(CONF_IP_ADDRESS): cv.string,
             cv.Optional(CONF_PORT, default=1202): cv.port,
-            cv.Optional(CONF_COB_ID, default=1): cv.uint16_t,
-            cv.Optional(CONF_CHECKSUM, default=0): cv.uint16_t,
+            cv.Optional(CONF_LIST_ID, default=1): cv.uint16_t,
+            cv.Optional(CONF_VAR_COUNT, default=0): cv.uint16_t,
             cv.Optional(CONF_DIRECTION, default="write"): cv.one_of("read", "write", "both", lower=True),
             cv.Optional(CONF_ENDIAN, default="little"): cv.one_of("little", "big", lower=True),
             cv.Optional(CONF_PACK_BOOLS, default=False): cv.boolean,
@@ -95,8 +95,8 @@ async def to_code(config):
 
     cg.add(var.set_ip_address(config[CONF_IP_ADDRESS]))
     cg.add(var.set_port(config[CONF_PORT]))
-    cg.add(var.set_cob_id(config[CONF_COB_ID]))
-    cg.add(var.set_checksum(config[CONF_CHECKSUM]))
+    cg.add(var.set_list_id(config[CONF_LIST_ID]))
+    cg.add(var.set_var_count(config[CONF_VAR_COUNT]))
     cg.add(var.set_direction(config[CONF_DIRECTION]))
     cg.add(var.set_big_endian(config[CONF_ENDIAN] == "big"))
     cg.add(var.set_pack_bools(config[CONF_PACK_BOOLS]))
