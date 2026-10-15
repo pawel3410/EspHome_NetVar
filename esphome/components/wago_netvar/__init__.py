@@ -77,7 +77,7 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_ENDIAN, default="little"): cv.one_of("little", "big", lower=True),
             cv.Optional(CONF_PACK_BOOLS, default=False): cv.boolean,
             cv.Optional(CONF_ALIGNMENT, default=True): cv.boolean,
-            cv.Optional(CONF_SEND_ON_CHANGE, default=True): cv.boolean,
+            cv.Optional(CONF_SEND_ON_CHANGE, default=False): cv.boolean,
             cv.Optional(CONF_MIN_INTERVAL, default="100ms"): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_VARIABLES): cv.ensure_list(VARIABLE_SCHEMA),
             cv.Optional(CONF_SENSORS): cv.ensure_list(SENSOR_SCHEMA),
