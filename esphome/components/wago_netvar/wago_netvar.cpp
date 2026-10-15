@@ -83,8 +83,8 @@ VarDef* WagoNetVarComponent::get_var(const std::string &name) {
 }
 
 void WagoNetVarComponent::setup() {
-    ESP_LOGI(TAG, "Start NetVar [Target IP: %s, COB-ID: %d, Port: %d, Direction: %s, Alignment: %s]", 
-             ip_address_.c_str(), cob_id_, port_, direction_.c_str(), alignment_ ? "TAK" : "NIE");
+    ESP_LOGI(TAG, "Start NetVar [Target IP: %s, list_ID: %d, Var Count: %d, Port: %d, Direction: %s, Alignment: %s]", 
+             ip_address_.c_str(), list_id_, var_count_, port_, direction_.c_str(), alignment_ ? "TAK" : "NIE");
     
     size_t offset = 0;
     uint8_t bool_bit_index = 0;
@@ -219,7 +219,6 @@ std::string WagoNetVarComponent::get_variable_value(const std::string &name) {
 }
 
 void WagoNetVarComponent::loop() {
-    // 1. Obsługa odczytu przychodzących ramek UDP
     if (enable_read_) {
         int packet_size = udp_.parsePacket();
         if (packet_size > 0) {
@@ -231,10 +230,10 @@ void WagoNetVarComponent::loop() {
                 if (packet_size >= 20 && rx_packet_buffer_[0] == 0x00 && rx_packet_buffer_[1] == 0x2D && 
                     rx_packet_buffer_[2] == 0x53 && rx_packet_buffer_[3] == 0x33) {
                     
-                    uint16_t pkt_cob_id = big_endian_ ? ((rx_packet_buffer_[8] << 8) | rx_packet_buffer_[9]) : (rx_packet_buffer_[8] | (rx_packet_buffer_[9] << 8));
-                    uint16_t pkt_checksum = big_endian_ ? ((rx_packet_buffer_[12] << 8) | rx_packet_buffer_[13]) : (rx_packet_buffer_[12] | (rx_packet_buffer_[13] << 8));
+                    uint16_t pkt_list_id = big_endian_ ? ((rx_packet_buffer_[8] << 8) | rx_packet_buffer_[9]) : (rx_packet_buffer_[8] | (rx_packet_buffer_[9] << 8));
+                    uint16_t pkt_var_count = big_endian_ ? ((rx_packet_buffer_[12] << 8) | rx_packet_buffer_[13]) : (rx_packet_buffer_[12] | (rx_packet_buffer_[13] << 8));
 
-                    if (pkt_cob_id == cob_id_ && (checksum_ == 0 || pkt_checksum == checksum_)) {
+                    if (pkt_list_id == list_id_ && (var_count_ == 0 || pkt_var_count == var_count_)) {
                         unpack_payload(rx_packet_buffer_.data() + 20, packet_size - 20);
                     }
                 }
@@ -242,7 +241,6 @@ void WagoNetVarComponent::loop() {
         }
     }
 
-    // 2. Cykliczne wysyłanie pakietu wyłącznie po upływie zadanego czasu (min_interval)
     if (enable_write_) {
         uint32_t now = millis();
         if (now - last_sent_time_ >= min_interval_ms_) {
@@ -251,9 +249,7 @@ void WagoNetVarComponent::loop() {
     }
 }
 
-void WagoNetVarComponent::update() {
-    // Nieużywane – wysyłanie cykliczne w pełni obsługiwane w pętli loop() w oparciu o min_interval
-}
+void WagoNetVarComponent::update() {}
 
 void WagoNetVarComponent::unpack_payload(const uint8_t *payload, size_t len) {
     if (len < payload_size_) return;
@@ -342,8 +338,8 @@ void WagoNetVarComponent::send_packet_() {
         else { ptr[0] = val & 0xFF; ptr[1] = (val >> 8) & 0xFF; }
     };
 
-    write_u16(&header[8], cob_id_);
-    write_u16(&header[12], checksum_);
+    write_u16(&header[8], list_id_);
+    write_u16(&header[12], var_count_);
     write_u16(&header[14], total_len);
     write_u16(&header[16], sequence_counter_++);
 
