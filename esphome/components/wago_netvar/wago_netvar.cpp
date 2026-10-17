@@ -8,6 +8,18 @@ namespace wago_netvar {
 
 static const char *const TAG = "wago_netvar";
 
+// Pomocnicza funkcja do formatowania ciągu bajtów do postaci czytelnego ciągu HEX
+static std::string format_hex(const uint8_t *data, size_t length) {
+    std::string out;
+    char buf[4];
+    for (size_t i = 0; i < length; i++) {
+        snprintf(buf, sizeof(buf), "%02X ", data[i]);
+        out += buf;
+    }
+    if (!out.empty()) out.pop_back();
+    return out;
+}
+
 // --- Wewnętrzne funkcje pomocnicze do szybkiej obsługi pamięci ---
 static void write_bytes(uint8_t *dst, uint64_t val, size_t size, bool big_endian) {
     for (size_t i = 0; i < size; i++) {
@@ -257,7 +269,6 @@ void WagoNetVarComponent::trigger_send_() {
 }
 
 void WagoNetVarComponent::loop() {
-    // 1. Obsługa odczytu przychodzących ramek UDP
     if (enable_read_) {
         int packet_size = udp_.parsePacket();
         if (packet_size > 0) {
@@ -265,6 +276,14 @@ void WagoNetVarComponent::loop() {
                 udp_.flush();
             } else {
                 udp_.read(rx_packet_buffer_.data(), packet_size);
+
+                // Informacja w logu INFO
+                ESP_LOGI(TAG, "RX %s (rozmiar: %d B)", 
+                         udp_.remoteIP().toString().c_str(), packet_size);
+
+                // Podgląd HEX w logu DEBUG
+                ESP_LOGD(TAG, "RX HEX: %s", 
+                         format_hex(rx_packet_buffer_.data(), packet_size).c_str());
 
                 if (packet_size >= 20 && rx_packet_buffer_[0] == 0x00 && rx_packet_buffer_[1] == 0x2D && 
                     rx_packet_buffer_[2] == 0x53 && rx_packet_buffer_[3] == 0x33) {
@@ -274,13 +293,17 @@ void WagoNetVarComponent::loop() {
 
                     if (pkt_list_id == list_id_ && (var_count_ == 0 || pkt_var_count == var_count_)) {
                         unpack_payload(rx_packet_buffer_.data() + 20, packet_size - 20);
+                    } else {
+                        ESP_LOGW(TAG, "Odrzucono pakiet NetVar: niezgodny list_ID (%d != %d) lub var_count (%d != %d)", 
+                                 pkt_list_id, list_id_, pkt_var_count, var_count_);
                     }
+                } else {
+                    ESP_LOGW(TAG, "Odrzucono pakiet: niepoprawny nagłówek NetVar Magic Bytes");
                 }
             }
         }
     }
 
-    // 2. Obsługa kolejkowania wysyłania po zmianie z zachowaniem minimalnego interwału
     if (enable_write_ && send_on_change_ && is_dirty_) {
         uint32_t now = millis();
         if (now - last_sent_time_ >= min_interval_ms_) {
@@ -290,7 +313,6 @@ void WagoNetVarComponent::loop() {
 }
 
 void WagoNetVarComponent::update() {
-    // Cykliczne wysyłanie pakietu (heartbeat / stały interwał określony przez update_interval w YAML)
     if (enable_write_) {
         send_packet_();
     }
@@ -392,6 +414,19 @@ void WagoNetVarComponent::send_packet_() {
         udp_.write(header, 20);
         udp_.write(tx_buffer_.data(), payload_size_);
         udp_.endPacket();
+
+        // Informacja w logu INFO
+        ESP_LOGI(TAG, "TX %s:%d (list_ID: %d, rozmiar: %d B)", 
+                 ip_address_.c_str(), port_, list_id_, total_len);
+
+        // Podgląd HEX w logu DEBUG
+        std::vector<uint8_t> full_packet(header, header + 20);
+        full_packet.insert(full_packet.end(), tx_buffer_.begin(), tx_buffer_.end());
+
+        ESP_LOGD(TAG, "TX HEX: %s", 
+                 format_hex(full_packet.data(), full_packet.size()).c_str());
+    } else {
+        ESP_LOGE(TAG, "Błąd podczas rozpoczynania wysyłania pakietu UDP do IP: %s", ip_address_.c_str());
     }
 
     last_sent_time_ = millis();
