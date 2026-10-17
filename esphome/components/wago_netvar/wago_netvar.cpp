@@ -275,11 +275,21 @@ void WagoNetVarComponent::loop() {
             if ((size_t)packet_size > rx_packet_buffer_.size()) {
                 udp_.flush();
             } else {
+                IPAddress remote_ip = udp_.remoteIP();
+                uint16_t remote_port = udp_.remotePort();
                 udp_.read(rx_packet_buffer_.data(), packet_size);
 
-                // Informacja w logu INFO
-                ESP_LOGI(TAG, "RX %s (rozmiar: %d B)", 
-                         udp_.remoteIP().toString().c_str(), packet_size);
+                uint16_t pkt_list_id = 0;
+                uint16_t pkt_var_count = 0;
+                if (packet_size >= 20 && rx_packet_buffer_[0] == 0x00 && rx_packet_buffer_[1] == 0x2D && 
+                    rx_packet_buffer_[2] == 0x53 && rx_packet_buffer_[3] == 0x33) {
+                    pkt_list_id = big_endian_ ? ((rx_packet_buffer_[8] << 8) | rx_packet_buffer_[9]) : (rx_packet_buffer_[8] | (rx_packet_buffer_[9] << 8));
+                    pkt_var_count = big_endian_ ? ((rx_packet_buffer_[12] << 8) | rx_packet_buffer_[13]) : (rx_packet_buffer_[12] | (rx_packet_buffer_[13] << 8));
+                }
+
+                // Logowanie w formacie RX IP:PORT (ID: X, var: Y, size: Z B)
+                ESP_LOGI(TAG, "RX %s:%d (ID: %d, var: %d, size: %d B)", 
+                         remote_ip.toString().c_str(), remote_port, pkt_list_id, pkt_var_count, packet_size);
 
                 // Podgląd HEX w logu DEBUG
                 ESP_LOGD(TAG, "RX HEX: %s", 
@@ -288,9 +298,6 @@ void WagoNetVarComponent::loop() {
                 if (packet_size >= 20 && rx_packet_buffer_[0] == 0x00 && rx_packet_buffer_[1] == 0x2D && 
                     rx_packet_buffer_[2] == 0x53 && rx_packet_buffer_[3] == 0x33) {
                     
-                    uint16_t pkt_list_id = big_endian_ ? ((rx_packet_buffer_[8] << 8) | rx_packet_buffer_[9]) : (rx_packet_buffer_[8] | (rx_packet_buffer_[9] << 8));
-                    uint16_t pkt_var_count = big_endian_ ? ((rx_packet_buffer_[12] << 8) | rx_packet_buffer_[13]) : (rx_packet_buffer_[12] | (rx_packet_buffer_[13] << 8));
-
                     if (pkt_list_id == list_id_ && (var_count_ == 0 || pkt_var_count == var_count_)) {
                         unpack_payload(rx_packet_buffer_.data() + 20, packet_size - 20);
                     } else {
@@ -415,9 +422,9 @@ void WagoNetVarComponent::send_packet_() {
         udp_.write(tx_buffer_.data(), payload_size_);
         udp_.endPacket();
 
-        // Informacja w logu INFO
-        ESP_LOGI(TAG, "TX %s:%d (list_ID: %d, rozmiar: %d B)", 
-                 ip_address_.c_str(), port_, list_id_, total_len);
+        // Logowanie w formacie TX IP:PORT (ID: X, var: Y, size: Z B)
+        ESP_LOGI(TAG, "TX %s:%d (ID: %d, var: %d, size: %d B)", 
+                 ip_address_.c_str(), port_, list_id_, var_count_, total_len);
 
         // Podgląd HEX w logu DEBUG
         std::vector<uint8_t> full_packet(header, header + 20);
