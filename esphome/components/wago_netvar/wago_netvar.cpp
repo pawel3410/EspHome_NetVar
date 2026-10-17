@@ -287,8 +287,8 @@ void WagoNetVarComponent::loop() {
                     pkt_var_count = big_endian_ ? ((rx_packet_buffer_[12] << 8) | rx_packet_buffer_[13]) : (rx_packet_buffer_[12] | (rx_packet_buffer_[13] << 8));
                 }
 
-                // Logowanie w formacie RX IP:PORT (ID: X, var: Y, size: Z B)
-                ESP_LOGI(TAG, "RX %s:%d (ID: %d, var: %d, size: %d B)", 
+                // Logowanie w formacie RX IP:PORT (ID:X, var:Y, size:Z B) bez spacji po dwukropkach
+                ESP_LOGI(TAG, "RX %s:%d (ID:%d, var:%d, size:%d B)", 
                          remote_ip.toString().c_str(), remote_port, pkt_list_id, pkt_var_count, packet_size);
 
                 // Podgląd HEX w logu DEBUG
@@ -422,8 +422,8 @@ void WagoNetVarComponent::send_packet_() {
         udp_.write(tx_buffer_.data(), payload_size_);
         udp_.endPacket();
 
-        // Logowanie w formacie TX IP:PORT (ID: X, var: Y, size: Z B)
-        ESP_LOGI(TAG, "TX %s:%d (ID: %d, var: %d, size: %d B)", 
+        // Logowanie w formacie TX IP:PORT (ID:X, var:Y, size:Z B) bez spacji po dwukropkach
+        ESP_LOGI(TAG, "TX %s:%d (ID:%d, var:%d, size:%d B)", 
                  ip_address_.c_str(), port_, list_id_, var_count_, total_len);
 
         // Podgląd HEX w logu DEBUG
