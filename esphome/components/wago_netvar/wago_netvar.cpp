@@ -1,444 +1,1193 @@
+
 #include "wago_netvar.h"
+
+#include <algorithm>
+#include <cctype>
 #include <cmath>
-#include <cstring>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <limits>
 
 namespace esphome {
 namespace wago_netvar {
 
 static const char *const TAG = "wago_netvar";
 
-// Pomocnicza funkcja do formatowania ciągu bajtów do postaci czytelnego ciągu HEX
-static std::string format_hex(const uint8_t *data, size_t length) {
-    std::string out;
-    char buf[4];
-    for (size_t i = 0; i < length; i++) {
-        snprintf(buf, sizeof(buf), "%02X ", data[i]);
-        out += buf;
-    }
-    if (!out.empty()) out.pop_back();
-    return out;
-}
+static constexpr uint8_t MAGIC_BYTES[4] = {
+    0x00, 0x2D, 0x53, 0x33
+};
 
-// --- Wewnętrzne funkcje pomocnicze do szybkiej obsługi pamięci ---
-static void write_bytes(uint8_t *dst, uint64_t val, size_t size, bool big_endian) {
-    for (size_t i = 0; i < size; i++) {
-        dst[i] = big_endian ? ((val >> ((size - 1 - i) * 8)) & 0xFF) : ((val >> (i * 8)) & 0xFF);
-    }
-}
-
-static uint64_t read_bytes(const uint8_t *src, size_t size, bool big_endian) {
-    uint64_t val = 0;
-    for (size_t i = 0; i < size; i++) {
-        if (big_endian) val = (val << 8) | src[i];
-        else val |= ((uint64_t)src[i] << (i * 8));
-    }
-    return val;
-}
+static constexpr size_t MAX_PACKETS_PER_LOOP = 8;
 
 #ifdef USE_SWITCH
 void WagoSwitch::write_state(bool state) {
-    if (parent_ != nullptr) {
-        parent_->set_variable_value(var_name_, state);
-        publish_state(state);
-    }
+  if (parent_ == nullptr)
+    return;
+
+  parent_->set_variable_value(var_name_, state);
+  publish_state(state);
 }
 #endif
 
 #ifdef USE_NUMBER
 void WagoNumber::control(float value) {
-    if (parent_ != nullptr) {
-        parent_->set_variable_value(var_name_, value);
-        publish_state(value);
-    }
+  if (parent_ == nullptr)
+    return;
+
+  parent_->set_variable_value(var_name_, value);
+  publish_state(value);
 }
 #endif
 
-void WagoNetVarComponent::get_type_info(const std::string &type, size_t &size, size_t &align) {
-    size = 0;
-    align = 1;
-    if (type == "BOOL") { size = 1; align = 1; }
-    else if (type == "BYTE" || type == "USINT" || type == "SINT") { size = 1; align = 1; }
-    else if (type == "WORD" || type == "UINT" || type == "INT") { size = 2; align = 2; }
-    else if (type == "DWORD" || type == "UDINT" || type == "DINT" || type == "TIME") { size = 4; align = 4; }
-    else if (type == "REAL") { size = 4; align = 2; }
-    else if (type == "LREAL") { size = 8; align = 8; }
-    else if (type.rfind("STRING", 0) == 0) {
-        size_t start = type.find('(');
-        size_t end = type.find(')');
-        if (start != std::string::npos && end != std::string::npos) {
-            size = std::stoi(type.substr(start + 1, end - start - 1)) + 1;
-        } else {
-            size = 81;
-        }
-        align = 1;
-    }
+bool WagoNetVarComponent::get_type_info(
+    const std::string &type,
+    VariableType &variable_type,
+    size_t &size,
+    size_t &alignment) {
+
+  size = 0;
+  alignment = 1;
+
+  if (type == "BOOL") {
+    variable_type = VariableType::BOOL;
+    size = 1;
+  } else if (type == "BYTE") {
+    variable_type = VariableType::BYTE;
+    size = 1;
+  } else if (type == "USINT") {
+    variable_type = VariableType::USINT;
+    size = 1;
+  } else if (type == "SINT") {
+    variable_type = VariableType::SINT;
+    size = 1;
+  } else if (type == "WORD") {
+    variable_type = VariableType::WORD;
+    size = 2;
+    alignment = 2;
+  } else if (type == "UINT") {
+    variable_type = VariableType::UINT;
+    size = 2;
+    alignment = 2;
+  } else if (type == "INT") {
+    variable_type = VariableType::INT;
+    size = 2;
+    alignment = 2;
+  } else if (type == "DWORD") {
+    variable_type = VariableType::DWORD;
+    size = 4;
+    alignment = 4;
+  } else if (type == "UDINT") {
+    variable_type = VariableType::UDINT;
+    size = 4;
+    alignment = 4;
+  } else if (type == "DINT") {
+    variable_type = VariableType::DINT;
+    size = 4;
+    alignment = 4;
+  } else if (type == "TIME") {
+    variable_type = VariableType::TIME;
+    size = 4;
+    alignment = 4;
+  } else if (type == "REAL") {
+    variable_type = VariableType::REAL;
+    size = 4;
+    alignment = 2;
+  } else if (type == "LREAL") {
+    variable_type = VariableType::LREAL;
+    size = 8;
+    alignment = 8;
+  } else if (type.rfind("STRING(", 0) == 0 &&
+             type.back() == ')') {
+
+    const std::string length_text =
+        type.substr(7, type.size() - 8);
+
+    if (length_text.empty())
+      return false;
+
+    char *end = nullptr;
+
+    unsigned long length =
+        std::strtoul(length_text.c_str(), &end, 10);
+
+    if (end == nullptr || *end != '\0' ||
+        length < 1 || length > 255)
+      return false;
+
+    variable_type = VariableType::STRING;
+    size = static_cast<size_t>(length) + 1;
+  } else {
+    return false;
+  }
+
+  return true;
 }
 
-void WagoNetVarComponent::add_variable(const std::string &name, const std::string &type) {
-    VarDef v;
-    v.name = name;
-    v.type = type;
-    get_type_info(type, v.size, v.align);
-    if (v.size == 0) {
-        ESP_LOGE(TAG, "Nieznany lub nieobsługiwany typ zmiennej: %s dla zmiennej %s", type.c_str(), name.c_str());
-        return;
-    }
-    variables_.push_back(v);
+void WagoNetVarComponent::add_variable(
+    const std::string &name,
+    const std::string &type) {
+
+  if (name.empty()) {
+    ESP_LOGE(TAG, "Variable name cannot be empty");
+    mark_failed();
+    return;
+  }
+
+  if (get_var(name) != nullptr) {
+    ESP_LOGE(TAG, "Duplicate variable: %s", name.c_str());
+    mark_failed();
+    return;
+  }
+
+  VarDef var;
+
+  var.name = name;
+  var.type_name = type;
+
+  if (!get_type_info(
+          type,
+          var.type,
+          var.size,
+          var.alignment)) {
+
+    ESP_LOGE(
+        TAG,
+        "Unsupported variable type: %s (%s)",
+        type.c_str(),
+        name.c_str());
+
+    mark_failed();
+    return;
+  }
+
+  if (variables_.size() >= NETVAR_MAX_PAYLOAD_SIZE) {
+    ESP_LOGE(TAG, "Too many NetVar variables");
+    mark_failed();
+    return;
+  }
+
+  variables_.push_back(var);
 }
 
-VarDef* WagoNetVarComponent::get_var(const std::string &name) {
-    for (auto &v : variables_) {
-        if (v.name == name) return &v;
+VarDef *WagoNetVarComponent::get_var(
+    const std::string &name) {
+
+  for (auto &var : variables_) {
+    if (var.name == name)
+      return &var;
+  }
+
+  return nullptr;
+}
+
+#ifdef USE_SENSOR
+void WagoNetVarComponent::register_sensor(
+    const std::string &name,
+    sensor::Sensor *entity) {
+
+  VarDef *var = get_var(name);
+
+  if (var == nullptr || entity == nullptr) {
+    ESP_LOGE(TAG, "Invalid sensor mapping: %s", name.c_str());
+    mark_failed();
+    return;
+  }
+
+  if (var->type == VariableType::BOOL ||
+      var->type == VariableType::STRING) {
+    ESP_LOGE(TAG, "Invalid numeric sensor type: %s", name.c_str());
+    mark_failed();
+    return;
+  }
+
+  if (var->sensor_ptr != nullptr) {
+    ESP_LOGE(TAG, "Duplicate sensor mapping: %s", name.c_str());
+    mark_failed();
+    return;
+  }
+
+  var->sensor_ptr = entity;
+}
+#endif
+
+#ifdef USE_BINARY_SENSOR
+void WagoNetVarComponent::register_binary_sensor(
+    const std::string &name,
+    binary_sensor::BinarySensor *entity) {
+
+  VarDef *var = get_var(name);
+
+  if (var == nullptr || entity == nullptr ||
+      var->type != VariableType::BOOL) {
+
+    ESP_LOGE(TAG, "Invalid binary sensor mapping: %s", name.c_str());
+    mark_failed();
+    return;
+  }
+
+  if (var->binary_sensor_ptr != nullptr) {
+    ESP_LOGE(TAG, "Duplicate binary sensor mapping: %s", name.c_str());
+    mark_failed();
+    return;
+  }
+
+  var->binary_sensor_ptr = entity;
+}
+#endif
+
+#ifdef USE_TEXT_SENSOR
+void WagoNetVarComponent::register_text_sensor(
+    const std::string &name,
+    text_sensor::TextSensor *entity) {
+
+  VarDef *var = get_var(name);
+
+  if (var == nullptr || entity == nullptr ||
+      var->type != VariableType::STRING) {
+
+    ESP_LOGE(TAG, "Invalid text sensor mapping: %s", name.c_str());
+    mark_failed();
+    return;
+  }
+
+  if (var->text_sensor_ptr != nullptr) {
+    ESP_LOGE(TAG, "Duplicate text sensor mapping: %s", name.c_str());
+    mark_failed();
+    return;
+  }
+
+  var->text_sensor_ptr = entity;
+}
+#endif
+
+#ifdef USE_SWITCH
+void WagoNetVarComponent::register_switch(
+    const std::string &name,
+    switch_::Switch *entity) {
+
+  VarDef *var = get_var(name);
+
+  if (var == nullptr || entity == nullptr ||
+      var->type != VariableType::BOOL) {
+
+    ESP_LOGE(TAG, "Invalid switch mapping: %s", name.c_str());
+    mark_failed();
+    return;
+  }
+
+  if (var->switch_ptr != nullptr) {
+    ESP_LOGE(TAG, "Duplicate switch mapping: %s", name.c_str());
+    mark_failed();
+    return;
+  }
+
+  var->switch_ptr = entity;
+}
+#endif
+
+#ifdef USE_NUMBER
+void WagoNetVarComponent::register_number(
+    const std::string &name,
+    number::Number *entity) {
+
+  VarDef *var = get_var(name);
+
+  if (var == nullptr || entity == nullptr ||
+      var->type == VariableType::BOOL ||
+      var->type == VariableType::STRING) {
+
+    ESP_LOGE(TAG, "Invalid number mapping: %s", name.c_str());
+    mark_failed();
+    return;
+  }
+
+  if (var->number_ptr != nullptr) {
+    ESP_LOGE(TAG, "Duplicate number mapping: %s", name.c_str());
+    mark_failed();
+    return;
+  }
+
+  var->number_ptr = entity;
+}
+#endif
+
+bool WagoNetVarComponent::calculate_layout_() {
+  size_t offset = 0;
+  uint8_t bool_bit_index = 0;
+
+  for (auto &var : variables_) {
+    if (var.type != VariableType::BOOL &&
+        bool_bit_index > 0) {
+
+      ++offset;
+      bool_bit_index = 0;
     }
-    return nullptr;
+
+    if (var.type == VariableType::BOOL && pack_bools_) {
+      var.byte_offset = offset;
+      var.bit_offset = bool_bit_index;
+
+      ++bool_bit_index;
+
+      if (bool_bit_index >= 8) {
+        bool_bit_index = 0;
+        ++offset;
+      }
+
+      continue;
+    }
+
+    if (alignment_ && var.alignment > 1) {
+      const size_t remainder = offset % var.alignment;
+
+      if (remainder != 0)
+        offset += var.alignment - remainder;
+    }
+
+    var.byte_offset = offset;
+    var.bit_offset = 0;
+
+    if (var.size > NETVAR_MAX_PAYLOAD_SIZE - offset)
+      return false;
+
+    offset += var.size;
+  }
+
+  if (bool_bit_index > 0)
+    ++offset;
+
+  if (offset > NETVAR_MAX_PAYLOAD_SIZE)
+    return false;
+
+  payload_size_ = offset;
+
+  return true;
 }
 
 void WagoNetVarComponent::setup() {
-    ESP_LOGI(TAG, "Start NetVar [Target IP: %s, list_ID: %d, Var Count: %d, Port: %d, Direction: %s, Alignment: %s, Send on Change: %s]", 
-             ip_address_.c_str(), list_id_, var_count_, port_, direction_.c_str(), alignment_ ? "TAK" : "NIE", send_on_change_ ? "TAK" : "NIE");
-    
-    size_t offset = 0;
-    uint8_t bool_bit_index = 0;
+  if (variables_.empty()) {
+    ESP_LOGE(TAG, "No NetVar variables configured");
+    mark_failed();
+    return;
+  }
 
-    for (auto &var : variables_) {
-        if (var.type != "BOOL" && bool_bit_index > 0) {
-            offset++;
-            bool_bit_index = 0;
-        }
+  if (enable_read_ == enable_write_) {
+    ESP_LOGE(TAG, "Invalid communication direction");
+    mark_failed();
+    return;
+  }
 
-        if (var.type == "BOOL" && pack_bools_) {
-            var.byte_offset = offset;
-            var.bit_offset = bool_bit_index;
-            bool_bit_index++;
-            if (bool_bit_index >= 8) {
-                bool_bit_index = 0;
-                offset++;
-            }
-        } else {
-            if (alignment_ && var.align > 1) {
-                size_t rem = offset % var.align;
-                if (rem != 0) offset += (var.align - rem);
-            }
-            var.byte_offset = offset;
-            var.bit_offset = 0;
-            offset += var.size;
-        }
-    }
-    if (bool_bit_index > 0) offset++;
-    
-    payload_size_ = offset;
-    
-    tx_buffer_.resize(payload_size_, 0);
-    rx_buffer_.resize(payload_size_, 0);
-    rx_packet_buffer_.resize(1500, 0);
+  IPAddress target_ip;
 
-    udp_.begin(port_);
+  if (!target_ip.fromString(ip_address_.c_str())) {
+    ESP_LOGE(TAG, "Invalid target IPv4 address");
+    mark_failed();
+    return;
+  }
+
+  if (!calculate_layout_()) {
+    ESP_LOGE(
+        TAG,
+        "NetVar payload exceeds maximum size of %u bytes",
+        static_cast<unsigned>(NETVAR_MAX_PAYLOAD_SIZE));
+
+    mark_failed();
+    return;
+  }
+
+  const uint16_t actual_var_count =
+      static_cast<uint16_t>(variables_.size());
+
+  if (var_count_ != actual_var_count) {
+    ESP_LOGE(
+        TAG,
+        "var_count mismatch: configured=%u actual=%u",
+        var_count_,
+        actual_var_count);
+
+    mark_failed();
+    return;
+  }
+
+  tx_buffer_.assign(payload_size_, 0);
+  rx_buffer_.assign(payload_size_, 0);
+
+  if (tx_buffer_.size() != payload_size_ ||
+      rx_buffer_.size() != payload_size_) {
+
+    ESP_LOGE(TAG, "Unable to allocate NetVar buffers");
+    mark_failed();
+    return;
+  }
+
+  if (udp_.begin(port_) == 0) {
+    ESP_LOGE(TAG, "Unable to initialize UDP on port %u", port_);
+    mark_failed();
+    return;
+  }
+
+  udp_started_ = true;
+
+  ESP_LOGI(
+      TAG,
+      "NetVar started: IP=%s port=%u list_ID=%u variables=%u "
+      "payload=%u direction=%s endian=%s",
+      ip_address_.c_str(),
+      port_,
+      list_id_,
+      var_count_,
+      static_cast<unsigned>(payload_size_),
+      enable_read_ ? "read" : "write",
+      big_endian_ ? "big" : "little");
 }
 
-void WagoNetVarComponent::set_variable_value(const std::string &name, bool value) {
-    VarDef *var = get_var(name);
-    if (!var || var->type != "BOOL") return;
-    
-    uint8_t mask = 1 << var->bit_offset;
-    uint8_t old_byte = tx_buffer_[var->byte_offset];
-    uint8_t new_byte = value ? (old_byte | mask) : (old_byte & ~mask);
-    
-    if (old_byte != new_byte) {
-        tx_buffer_[var->byte_offset] = new_byte;
-        if (send_on_change_) {
-            is_dirty_ = true;
-            trigger_send_();
-        }
-    }
+uint16_t WagoNetVarComponent::read_u16_(
+    const uint8_t *data) const {
+
+  if (big_endian_)
+    return (static_cast<uint16_t>(data[0]) << 8) | data[1];
+
+  return static_cast<uint16_t>(data[0]) |
+         (static_cast<uint16_t>(data[1]) << 8);
 }
 
-void WagoNetVarComponent::set_variable_value(const std::string &name, float value) {
-    VarDef *var = get_var(name);
-    if (!var) return;
+void WagoNetVarComponent::write_u16_(
+    uint8_t *data,
+    uint16_t value) const {
 
-    std::vector<uint8_t> temp(var->size, 0);
-    if (var->type == "REAL") {
-        uint32_t val_u;
-        std::memcpy(&val_u, &value, 4);
-        write_bytes(temp.data(), val_u, 4, big_endian_);
-    } else if (var->type == "LREAL") {
-        double d = value;
-        uint64_t val_u;
-        std::memcpy(&val_u, &d, 8);
-        write_bytes(temp.data(), val_u, 8, big_endian_);
+  if (big_endian_) {
+    data[0] = static_cast<uint8_t>(value >> 8);
+    data[1] = static_cast<uint8_t>(value);
+  } else {
+    data[0] = static_cast<uint8_t>(value);
+    data[1] = static_cast<uint8_t>(value >> 8);
+  }
+}
+
+void WagoNetVarComponent::write_bytes_(
+    uint8_t *destination,
+    uint64_t value,
+    size_t size) const {
+
+  for (size_t i = 0; i < size; ++i) {
+    const size_t shift_index =
+        big_endian_ ? size - 1 - i : i;
+
+    destination[i] =
+        static_cast<uint8_t>(value >> (shift_index * 8));
+  }
+}
+
+uint64_t WagoNetVarComponent::read_integer_(
+    const uint8_t *data,
+    size_t size) const {
+
+  uint64_t result = 0;
+
+  for (size_t i = 0; i < size; ++i) {
+    if (big_endian_) {
+      result = (result << 8) | data[i];
     } else {
-        int64_t val_i = static_cast<int64_t>(value);
-        write_bytes(temp.data(), static_cast<uint64_t>(val_i), var->size, big_endian_);
+      result |= static_cast<uint64_t>(data[i]) << (i * 8);
     }
+  }
+
+  return result;
+}
+
+bool WagoNetVarComponent::write_integer_(
+    VarDef &var,
+    uint64_t value) {
+
+  if (var.byte_offset + var.size > tx_buffer_.size())
+    return false;
+
+  bool changed = false;
+
+  for (size_t i = 0; i < var.size; ++i) {
+    const size_t shift_index =
+        big_endian_ ? var.size - 1 - i : i;
+
+    const uint8_t byte =
+        static_cast<uint8_t>(value >> (shift_index * 8));
+
+    uint8_t &destination =
+        tx_buffer_[var.byte_offset + i];
+
+    if (destination != byte) {
+      destination = byte;
+      changed = true;
+    }
+  }
+
+  if (changed && send_on_change_) {
+    is_dirty_ = true;
+    trigger_send_();
+  }
+
+  return true;
+}
+
+void WagoNetVarComponent::set_variable_value(
+    const std::string &name,
+    bool value) {
+
+  VarDef *var = get_var(name);
+
+  if (var == nullptr || var->type != VariableType::BOOL ||
+      !enable_write_)
+    return;
+
+  if (var->byte_offset >= tx_buffer_.size())
+    return;
+
+  const uint8_t mask =
+      static_cast<uint8_t>(1U << var->bit_offset);
+
+  uint8_t &destination = tx_buffer_[var->byte_offset];
+
+  const uint8_t updated =
+      value ? destination | mask : destination & ~mask;
+
+  if (destination != updated) {
+    destination = updated;
+
+    if (send_on_change_) {
+      is_dirty_ = true;
+      trigger_send_();
+    }
+  }
+}
+
+void WagoNetVarComponent::set_variable_value(
+    const std::string &name,
+    int value) {
+
+  VarDef *var = get_var(name);
+
+  if (var == nullptr || !enable_write_)
+    return;
+
+  if (var->type == VariableType::BOOL ||
+      var->type == VariableType::REAL ||
+      var->type == VariableType::LREAL ||
+      var->type == VariableType::STRING)
+    return;
+
+  int64_t signed_min = 0;
+  int64_t signed_max = 0;
+  uint64_t unsigned_max = 0;
+
+  bool is_signed = false;
+
+  switch (var->type) {
+    case VariableType::SINT:
+      is_signed = true;
+      signed_min = INT8_MIN;
+      signed_max = INT8_MAX;
+      break;
+
+    case VariableType::INT:
+      is_signed = true;
+      signed_min = INT16_MIN;
+      signed_max = INT16_MAX;
+      break;
+
+    case VariableType::DINT:
+      is_signed = true;
+      signed_min = INT32_MIN;
+      signed_max = INT32_MAX;
+      break;
+
+    default:
+      unsigned_max =
+          var->size == 4 ? UINT32_MAX :
+          var->size == 2 ? UINT16_MAX :
+                           UINT8_MAX;
+      break;
+  }
+
+  if (is_signed) {
+    if (value < signed_min || value > signed_max) {
+      ESP_LOGW(TAG, "Value out of range for %s", name.c_str());
+      return;
+    }
+  } else {
+    if (value < 0 ||
+        static_cast<uint64_t>(value) > unsigned_max) {
+      ESP_LOGW(TAG, "Value out of range for %s", name.c_str());
+      return;
+    }
+  }
+
+  write_integer_(*var, static_cast<uint64_t>(
+      static_cast<int64_t>(value)));
+}
+
+void WagoNetVarComponent::set_variable_value(
+    const std::string &name,
+    float value) {
+
+  VarDef *var = get_var(name);
+
+  if (var == nullptr || !enable_write_ ||
+      !std::isfinite(value))
+    return;
+
+  if (var->type == VariableType::REAL) {
+    uint32_t raw = 0;
+    std::memcpy(&raw, &value, sizeof(raw));
+    write_integer_(*var, raw);
+    return;
+  }
+
+  if (var->type == VariableType::LREAL) {
+    const double converted = static_cast<double>(value);
+
+    uint64_t raw = 0;
+    std::memcpy(&raw, &converted, sizeof(raw));
+
+    write_integer_(*var, raw);
+    return;
+  }
+
+  if (var->type == VariableType::BOOL ||
+      var->type == VariableType::STRING)
+    return;
+
+  const double minimum =
+      var->type == VariableType::SINT ? INT8_MIN :
+      var->type == VariableType::INT ? INT16_MIN :
+      var->type == VariableType::DINT ? INT32_MIN : 0.0;
+
+  const double maximum =
+      var->type == VariableType::SINT ? INT8_MAX :
+      var->type == VariableType::INT ? INT16_MAX :
+      var->type == VariableType::DINT ? INT32_MAX :
+      var->size == 1 ? UINT8_MAX :
+      var->size == 2 ? UINT16_MAX : UINT32_MAX;
+
+  if (static_cast<double>(value) < minimum ||
+      static_cast<double>(value) > maximum) {
+    ESP_LOGW(TAG, "Value out of range for %s", name.c_str());
+    return;
+  }
+
+  if (var->type == VariableType::SINT ||
+      var->type == VariableType::INT ||
+      var->type == VariableType::DINT) {
+
+    write_integer_(
+        *var,
+        static_cast<uint64_t>(
+            static_cast<int64_t>(value)));
+
+  } else {
+    write_integer_(
+        *var,
+        static_cast<uint64_t>(value));
+  }
+}
+
+void WagoNetVarComponent::set_variable_value(
+    const std::string &name,
+    const std::string &value) {
+
+  VarDef *var = get_var(name);
+
+  if (var == nullptr || !enable_write_)
+    return;
+
+  if (var->type == VariableType::BOOL) {
+    if (value == "1" || value == "true" || value == "TRUE") {
+      set_variable_value(name, true);
+    } else if (value == "0" || value == "false" ||
+               value == "FALSE") {
+      set_variable_value(name, false);
+    } else {
+      ESP_LOGW(TAG, "Invalid BOOL value for %s", name.c_str());
+    }
+
+    return;
+  }
+
+  if (var->type == VariableType::STRING) {
+    if (var->byte_offset + var->size > tx_buffer_.size())
+      return;
 
     bool changed = false;
-    for (size_t i = 0; i < var->size; i++) {
-        if (tx_buffer_[var->byte_offset + i] != temp[i]) {
-            tx_buffer_[var->byte_offset + i] = temp[i];
-            changed = true;
-        }
+
+    for (size_t i = 0; i < var->size; ++i) {
+      const uint8_t byte =
+          i < value.size() && i < var->size - 1
+              ? static_cast<uint8_t>(value[i])
+              : 0;
+
+      uint8_t &destination =
+          tx_buffer_[var->byte_offset + i];
+
+      if (destination != byte) {
+        destination = byte;
+        changed = true;
+      }
     }
+
     if (changed && send_on_change_) {
-        is_dirty_ = true;
-        trigger_send_();
+      is_dirty_ = true;
+      trigger_send_();
     }
+
+    return;
+  }
+
+  char *end = nullptr;
+  const double numeric_value =
+      std::strtod(value.c_str(), &end);
+
+  if (end == value.c_str() || end == nullptr ||
+      *end != '\0' || !std::isfinite(numeric_value)) {
+    ESP_LOGW(TAG, "Invalid numeric value for %s", name.c_str());
+    return;
+  }
+
+  set_variable_value(name, static_cast<float>(numeric_value));
 }
 
-void WagoNetVarComponent::set_variable_value(const std::string &name, int value) {
-    VarDef *var = get_var(name);
-    if (!var) return;
-    
-    std::vector<uint8_t> temp(var->size, 0);
-    write_bytes(temp.data(), static_cast<uint64_t>(value), var->size, big_endian_);
-    
-    bool changed = false;
-    for (size_t i = 0; i < var->size; i++) {
-        if (tx_buffer_[var->byte_offset + i] != temp[i]) {
-            tx_buffer_[var->byte_offset + i] = temp[i];
-            changed = true;
-        }
-    }
-    if (changed && send_on_change_) {
-        is_dirty_ = true;
-        trigger_send_();
-    }
-}
+std::string WagoNetVarComponent::get_variable_value(
+    const std::string &name) {
 
-void WagoNetVarComponent::set_variable_value(const std::string &name, const std::string &value) {
-    VarDef *var = get_var(name);
-    if (!var) return;
+  VarDef *var = get_var(name);
 
-    if (var->type.rfind("STRING", 0) == 0) {
-        std::vector<uint8_t> temp(var->size, 0);
-        for (size_t i = 0; i < var->size; i++) {
-            temp[i] = (i < value.length() && i < var->size - 1) ? value[i] : 0x00;
-        }
+  if (var == nullptr)
+    return "";
 
-        bool changed = false;
-        for (size_t i = 0; i < var->size; i++) {
-            if (tx_buffer_[var->byte_offset + i] != temp[i]) {
-                tx_buffer_[var->byte_offset + i] = temp[i];
-                changed = true;
-            }
-        }
-        if (changed && send_on_change_) {
-            is_dirty_ = true;
-            trigger_send_();
-        }
-    } else if (var->type == "BOOL") {
-        set_variable_value(name, (value == "1" || value == "true" || value == "True"));
-    } else if (var->type == "REAL" || var->type == "LREAL") {
-        set_variable_value(name, std::strtof(value.c_str(), nullptr));
-    } else {
-        set_variable_value(name, static_cast<int>(std::strtol(value.c_str(), nullptr, 10)));
-    }
-}
+  if (var->type == VariableType::BOOL) {
+    if (var->byte_offset >= tx_buffer_.size())
+      return "";
 
-std::string WagoNetVarComponent::get_variable_value(const std::string &name) {
-    VarDef *var = get_var(name);
-    if (!var) return "";
+    return (tx_buffer_[var->byte_offset] &
+            (1U << var->bit_offset)) ? "1" : "0";
+  }
 
-    if (var->type == "BOOL") {
-        return (tx_buffer_[var->byte_offset] & (1 << var->bit_offset)) ? "1" : "0";
-    } else if (var->type == "REAL") {
-        uint32_t val_u = read_bytes(&tx_buffer_[var->byte_offset], 4, big_endian_);
-        float f; std::memcpy(&f, &val_u, 4);
-        return std::to_string(f);
-    } else if (var->type == "LREAL") {
-        uint64_t val_u = read_bytes(&tx_buffer_[var->byte_offset], 8, big_endian_);
-        double d; std::memcpy(&d, &val_u, 8);
-        return std::to_string(d);
-    } else if (var->type.rfind("STRING", 0) == 0) {
-        return std::string((const char*)&tx_buffer_[var->byte_offset], strnlen((const char*)&tx_buffer_[var->byte_offset], var->size));
-    } else {
-        int64_t val_i = static_cast<int64_t>(read_bytes(&tx_buffer_[var->byte_offset], var->size, big_endian_));
-        if (var->type == "SINT") val_i = static_cast<int8_t>(val_i);
-        else if (var->type == "INT") val_i = static_cast<int16_t>(val_i);
-        else if (var->type == "DINT") val_i = static_cast<int32_t>(val_i);
-        return std::to_string(val_i);
-    }
+  if (var->byte_offset + var->size > tx_buffer_.size())
+    return "";
+
+  if (var->type == VariableType::STRING) {
+    const char *data =
+        reinterpret_cast<const char *>(
+            &tx_buffer_[var->byte_offset]);
+
+    size_t length = 0;
+
+    while (length < var->size && data[length] != '\0')
+      ++length;
+
+    return std::string(data, length);
+  }
+
+  const uint64_t raw =
+      read_integer_(&tx_buffer_[var->byte_offset], var->size);
+
+  if (var->type == VariableType::REAL) {
+    uint32_t bits = static_cast<uint32_t>(raw);
+    float value = 0;
+    std::memcpy(&value, &bits, sizeof(value));
+    return std::to_string(value);
+  }
+
+  if (var->type == VariableType::LREAL) {
+    double value = 0;
+    std::memcpy(&value, &raw, sizeof(value));
+    return std::to_string(value);
+  }
+
+  int64_t signed_value = static_cast<int64_t>(raw);
+
+  switch (var->type) {
+    case VariableType::SINT:
+      signed_value = static_cast<int8_t>(raw);
+      break;
+
+    case VariableType::INT:
+      signed_value = static_cast<int16_t>(raw);
+      break;
+
+    case VariableType::DINT:
+      signed_value = static_cast<int32_t>(raw);
+      break;
+
+    default:
+      break;
+  }
+
+  switch (var->type) {
+    case VariableType::BYTE:
+    case VariableType::USINT:
+    case VariableType::WORD:
+    case VariableType::UINT:
+    case VariableType::DWORD:
+    case VariableType::UDINT:
+      return std::to_string(raw);
+
+    default:
+      return std::to_string(signed_value);
+  }
 }
 
 void WagoNetVarComponent::trigger_send_() {
-    if (!enable_write_ || !send_on_change_) return;
-    uint32_t now = millis();
-    if (now - last_sent_time_ >= min_interval_ms_) {
-        send_packet_();
-    }
+  if (!enable_write_ || !send_on_change_ || !is_dirty_)
+    return;
+
+  const uint32_t now = millis();
+
+  if (now - last_sent_time_ >= min_interval_ms_)
+    send_packet_();
 }
 
 void WagoNetVarComponent::loop() {
-    if (enable_read_) {
-        int packet_size = udp_.parsePacket();
-        if (packet_size > 0) {
-            if ((size_t)packet_size > rx_packet_buffer_.size()) {
-                udp_.flush();
-            } else {
-                IPAddress remote_ip = udp_.remoteIP();
-                uint16_t remote_port = udp_.remotePort();
-                udp_.read(rx_packet_buffer_.data(), packet_size);
+  if (!udp_started_)
+    return;
 
-                uint16_t pkt_list_id = 0;
-                uint16_t pkt_var_count = 0;
-                if (packet_size >= 20 && rx_packet_buffer_[0] == 0x00 && rx_packet_buffer_[1] == 0x2D && 
-                    rx_packet_buffer_[2] == 0x53 && rx_packet_buffer_[3] == 0x33) {
-                    pkt_list_id = big_endian_ ? ((rx_packet_buffer_[8] << 8) | rx_packet_buffer_[9]) : (rx_packet_buffer_[8] | (rx_packet_buffer_[9] << 8));
-                    pkt_var_count = big_endian_ ? ((rx_packet_buffer_[12] << 8) | rx_packet_buffer_[13]) : (rx_packet_buffer_[12] | (rx_packet_buffer_[13] << 8));
-                }
+  if (enable_read_) {
+    for (size_t count = 0; count < MAX_PACKETS_PER_LOOP; ++count) {
+      const int packet_size = udp_.parsePacket();
 
-                // Logowanie w formacie RX IP:PORT (ID:X, var:Y, size:Z B) bez spacji po dwukropkach
-                ESP_LOGI(TAG, "RX %s:%d (ID:%d, var:%d, size:%d B)", 
-                         remote_ip.toString().c_str(), remote_port, pkt_list_id, pkt_var_count, packet_size);
+      if (packet_size <= 0)
+        break;
 
-                // Podgląd HEX w logu DEBUG
-                ESP_LOGD(TAG, "RX HEX: %s", 
-                         format_hex(rx_packet_buffer_.data(), packet_size).c_str());
+      const IPAddress remote_ip = udp_.remoteIP();
+      const uint16_t remote_port = udp_.remotePort();
 
-                if (packet_size >= 20 && rx_packet_buffer_[0] == 0x00 && rx_packet_buffer_[1] == 0x2D && 
-                    rx_packet_buffer_[2] == 0x53 && rx_packet_buffer_[3] == 0x33) {
-                    
-                    if (pkt_list_id == list_id_ && (var_count_ == 0 || pkt_var_count == var_count_)) {
-                        unpack_payload(rx_packet_buffer_.data() + 20, packet_size - 20);
-                    } else {
-                        ESP_LOGW(TAG, "Odrzucono pakiet NetVar: niezgodny list_ID (%d != %d) lub var_count (%d != %d)", 
-                                 pkt_list_id, list_id_, pkt_var_count, var_count_);
-                    }
-                } else {
-                    ESP_LOGW(TAG, "Odrzucono pakiet: niepoprawny nagłówek NetVar Magic Bytes");
-                }
-            }
-        }
+      if (static_cast<size_t>(packet_size) >
+          NETVAR_MAX_PACKET_SIZE) {
+
+        ++rejected_packets_;
+
+        while (udp_.available())
+          udp_.read();
+
+        ESP_LOGW(TAG, "Rejected oversized UDP packet: %d bytes",
+                 packet_size);
+
+        continue;
+      }
+
+      const int bytes_read =
+          udp_.read(rx_packet_buffer_.data(), packet_size);
+
+      if (bytes_read != packet_size) {
+        ++rx_errors_;
+        ESP_LOGW(TAG, "Incomplete UDP packet read");
+        continue;
+      }
+
+      if (!validate_packet_(
+              static_cast<size_t>(packet_size),
+              remote_ip,
+              remote_port)) {
+        ++rejected_packets_;
+        continue;
+      }
+
+      ++rx_packets_;
+
+      unpack_payload_(
+          rx_packet_buffer_.data() + NETVAR_HEADER_SIZE,
+          static_cast<size_t>(packet_size) - NETVAR_HEADER_SIZE);
     }
+  }
 
-    if (enable_write_ && send_on_change_ && is_dirty_) {
-        uint32_t now = millis();
-        if (now - last_sent_time_ >= min_interval_ms_) {
-            send_packet_();
-        }
+  if (enable_write_ && send_on_change_ && is_dirty_) {
+    const uint32_t now = millis();
+
+    if (now - last_sent_time_ >= min_interval_ms_)
+      send_packet_();
+  }
+}
+
+bool WagoNetVarComponent::validate_packet_(
+    size_t packet_size,
+    const IPAddress &remote_ip,
+    uint16_t remote_port) {
+
+  if (packet_size < NETVAR_HEADER_SIZE ||
+      packet_size > NETVAR_MAX_PACKET_SIZE) {
+
+    ESP_LOGW(TAG, "Invalid UDP packet size");
+    return false;
+  }
+
+  if (remote_ip.toString() != ip_address_ ||
+      remote_port != port_) {
+
+    ESP_LOGW(
+        TAG,
+        "Rejected packet from %s:%u",
+        remote_ip.toString().c_str(),
+        remote_port);
+
+    return false;
+  }
+
+  const uint8_t *header = rx_packet_buffer_.data();
+
+  for (size_t i = 0; i < 4; ++i) {
+    if (header[i] != MAGIC_BYTES[i]) {
+      ESP_LOGW(TAG, "Invalid NetVar magic bytes");
+      return false;
     }
+  }
+
+  const uint16_t packet_list_id = read_u16_(&header[8]);
+  const uint16_t packet_var_count = read_u16_(&header[12]);
+  const uint16_t declared_length = read_u16_(&header[14]);
+
+  if (packet_list_id != list_id_) {
+    ESP_LOGW(
+        TAG,
+        "Invalid list_ID: received=%u expected=%u",
+        packet_list_id,
+        list_id_);
+
+    return false;
+  }
+
+  if (packet_var_count != var_count_) {
+    ESP_LOGW(
+        TAG,
+        "Invalid var_count: received=%u expected=%u",
+        packet_var_count,
+        var_count_);
+
+    return false;
+  }
+
+  if (declared_length != packet_size) {
+    ESP_LOGW(
+        TAG,
+        "Invalid declared packet length: received=%u actual=%u",
+        declared_length,
+        static_cast<unsigned>(packet_size));
+
+    return false;
+  }
+
+  if (packet_size - NETVAR_HEADER_SIZE != payload_size_) {
+    ESP_LOGW(
+        TAG,
+        "Invalid payload length: received=%u expected=%u",
+        static_cast<unsigned>(packet_size - NETVAR_HEADER_SIZE),
+        static_cast<unsigned>(payload_size_));
+
+    return false;
+  }
+
+  return true;
+}
+
+void WagoNetVarComponent::unpack_payload_(
+    const uint8_t *payload,
+    size_t length) {
+
+  if (payload == nullptr || length != payload_size_)
+    return;
+
+  for (auto &var : variables_) {
+    if (var.byte_offset + var.size > length)
+      continue;
+
+    publish_variable_(var, payload);
+  }
+
+  if (!rx_buffer_.empty()) {
+    std::memcpy(rx_buffer_.data(), payload, payload_size_);
+  }
+
+  first_rx_done_ = true;
+}
+
+void WagoNetVarComponent::publish_variable_(
+    VarDef &var,
+    const uint8_t *payload) {
+
+  const uint8_t *data = payload + var.byte_offset;
+
+  if (var.type == VariableType::BOOL) {
+    const bool value =
+        (data[0] & (1U << var.bit_offset)) != 0;
+
+#ifdef USE_BINARY_SENSOR
+    if (var.binary_sensor_ptr != nullptr)
+      var.binary_sensor_ptr->publish_state(value);
+#endif
+
+    return;
+  }
+
+  if (var.type == VariableType::STRING) {
+    size_t length = 0;
+
+    while (length < var.size && data[length] != '\0')
+      ++length;
+
+#ifdef USE_TEXT_SENSOR
+    if (var.text_sensor_ptr != nullptr) {
+      var.text_sensor_ptr->publish_state(
+          std::string(
+              reinterpret_cast<const char *>(data),
+              length));
+    }
+#endif
+
+    return;
+  }
+
+  const uint64_t raw = read_integer_(data, var.size);
+
+  double value = 0;
+
+  if (var.type == VariableType::REAL) {
+    const uint32_t bits = static_cast<uint32_t>(raw);
+    float converted = 0;
+    std::memcpy(&converted, &bits, sizeof(converted));
+    value = converted;
+
+  } else if (var.type == VariableType::LREAL) {
+    double converted = 0;
+    std::memcpy(&converted, &raw, sizeof(converted));
+    value = converted;
+
+  } else {
+    int64_t signed_value = static_cast<int64_t>(raw);
+
+    switch (var.type) {
+      case VariableType::SINT:
+        signed_value = static_cast<int8_t>(raw);
+        value = static_cast<double>(signed_value);
+        break;
+
+      case VariableType::INT:
+        signed_value = static_cast<int16_t>(raw);
+        value = static_cast<double>(signed_value);
+        break;
+
+      case VariableType::DINT:
+        signed_value = static_cast<int32_t>(raw);
+        value = static_cast<double>(signed_value);
+        break;
+
+      default:
+        value = static_cast<double>(raw);
+        break;
+    }
+  }
+
+  if (!std::isfinite(value))
+    return;
+
+#ifdef USE_SENSOR
+  if (var.sensor_ptr != nullptr)
+    var.sensor_ptr->publish_state(static_cast<float>(value));
+#endif
 }
 
 void WagoNetVarComponent::update() {
-    if (enable_write_) {
-        send_packet_();
-    }
-}
-
-void WagoNetVarComponent::unpack_payload(const uint8_t *payload, size_t len) {
-    if (len < payload_size_) return;
-
-    for (auto &var : variables_) {
-        bool changed = false;
-        
-        if (var.type == "BOOL") {
-            uint8_t mask = 1 << var.bit_offset;
-            if ((rx_buffer_[var.byte_offset] & mask) != (payload[var.byte_offset] & mask)) changed = true;
-        } else {
-            if (std::memcmp(&rx_buffer_[var.byte_offset], &payload[var.byte_offset], var.size) != 0) changed = true;
-        }
-
-        if (changed || !first_rx_done_) {
-            if (var.type == "BOOL") {
-                if (payload[var.byte_offset] & (1 << var.bit_offset)) {
-                    rx_buffer_[var.byte_offset] |= (1 << var.bit_offset);
-                    tx_buffer_[var.byte_offset] |= (1 << var.bit_offset);
-                } else {
-                    rx_buffer_[var.byte_offset] &= ~(1 << var.bit_offset);
-                    tx_buffer_[var.byte_offset] &= ~(1 << var.bit_offset);
-                }
-            } else {
-                std::memcpy(&rx_buffer_[var.byte_offset], &payload[var.byte_offset], var.size);
-                std::memcpy(&tx_buffer_[var.byte_offset], &payload[var.byte_offset], var.size);
-            }
-
-            if (var.type == "BOOL") {
-                bool val = (payload[var.byte_offset] >> var.bit_offset) & 0x01;
-#ifdef USE_BINARY_SENSOR
-                if (var.binary_sensor_ptr) var.binary_sensor_ptr->publish_state(val);
-#endif
-#ifdef USE_SWITCH
-                if (var.switch_ptr) var.switch_ptr->publish_state(val);
-#endif
-            } else if (var.type == "REAL") {
-                uint32_t val_u = read_bytes(&payload[var.byte_offset], 4, big_endian_);
-                float f; std::memcpy(&f, &val_u, 4);
-#ifdef USE_SENSOR
-                if (var.sensor_ptr) var.sensor_ptr->publish_state(f);
-#endif
-#ifdef USE_NUMBER
-                if (var.number_ptr) var.number_ptr->publish_state(f);
-#endif
-            } else if (var.type == "LREAL") {
-                uint64_t val_u = read_bytes(&payload[var.byte_offset], 8, big_endian_);
-                double d; std::memcpy(&d, &val_u, 8);
-                float f = static_cast<float>(d);
-#ifdef USE_SENSOR
-                if (var.sensor_ptr) var.sensor_ptr->publish_state(f);
-#endif
-#ifdef USE_NUMBER
-                if (var.number_ptr) var.number_ptr->publish_state(f);
-#endif
-            } else if (var.type.rfind("STRING", 0) != 0) {
-                int64_t val_i = static_cast<int64_t>(read_bytes(&payload[var.byte_offset], var.size, big_endian_));
-                if (var.type == "SINT") val_i = static_cast<int8_t>(val_i);
-                else if (var.type == "INT") val_i = static_cast<int16_t>(val_i);
-                else if (var.type == "DINT") val_i = static_cast<int32_t>(val_i);
-                float f = static_cast<float>(val_i);
-#ifdef USE_SENSOR
-                if (var.sensor_ptr) var.sensor_ptr->publish_state(f);
-#endif
-#ifdef USE_NUMBER
-                if (var.number_ptr) var.number_ptr->publish_state(f);
-#endif
-            }
-        }
-    }
-    first_rx_done_ = true;
+  if (enable_write_)
+    send_packet_();
 }
 
 void WagoNetVarComponent::send_packet_() {
-    if (ip_address_.empty() || payload_size_ == 0) return;
+  if (!enable_write_ || !udp_started_ ||
+      payload_size_ == 0 ||
+      payload_size_ > NETVAR_MAX_PAYLOAD_SIZE)
+    return;
 
-    IPAddress target_ip;
-    if (!target_ip.fromString(ip_address_.c_str())) return;
+  IPAddress target_ip;
 
-    uint8_t header[20] = {0};
-    header[0] = 0x00; header[1] = 0x2D; header[2] = 0x53; header[3] = 0x33;
-    uint16_t total_len = 20 + payload_size_;
+  if (!target_ip.fromString(ip_address_.c_str())) {
+    ++tx_errors_;
+    ESP_LOGE(TAG, "Invalid target IP address");
+    return;
+  }
 
-    auto write_u16 = [this](uint8_t* ptr, uint16_t val) {
-        if (big_endian_) { ptr[0] = (val >> 8) & 0xFF; ptr[1] = val & 0xFF; }
-        else { ptr[0] = val & 0xFF; ptr[1] = (val >> 8) & 0xFF; }
-    };
+  const size_t total_length =
+      NETVAR_HEADER_SIZE + payload_size_;
 
-    write_u16(&header[8], list_id_);
-    write_u16(&header[12], var_count_);
-    write_u16(&header[14], total_len);
-    write_u16(&header[16], sequence_counter_++);
+  if (total_length > NETVAR_MAX_PACKET_SIZE ||
+      total_length > UINT16_MAX) {
 
-    if (udp_.beginPacket(target_ip, port_)) {
-        udp_.write(header, 20);
-        udp_.write(tx_buffer_.data(), payload_size_);
-        udp_.endPacket();
+    ++tx_errors_;
+    ESP_LOGE(TAG, "NetVar packet exceeds maximum size");
+    return;
+  }
 
-        // Logowanie w formacie TX IP:PORT (ID:X, var:Y, size:Z B) bez spacji po dwukropkach
-        ESP_LOGI(TAG, "TX %s:%d (ID:%d, var:%d, size:%d B)", 
-                 ip_address_.c_str(), port_, list_id_, var_count_, total_len);
+  uint8_t header[NETVAR_HEADER_SIZE] = {};
 
-        // Podgląd HEX w logu DEBUG
-        std::vector<uint8_t> full_packet(header, header + 20);
-        full_packet.insert(full_packet.end(), tx_buffer_.begin(), tx_buffer_.end());
+  std::memcpy(header, MAGIC_BYTES, sizeof(MAGIC_BYTES));
 
-        ESP_LOGD(TAG, "TX HEX: %s", 
-                 format_hex(full_packet.data(), full_packet.size()).c_str());
-    } else {
-        ESP_LOGE(TAG, "Błąd podczas rozpoczynania wysyłania pakietu UDP do IP: %s", ip_address_.c_str());
-    }
+  write_u16_(&header[8], list_id_);
+  write_u16_(&header[12], var_count_);
+  write_u16_(&header[14], static_cast<uint16_t>(total_length));
+  write_u16_(&header[16], sequence_counter_);
 
-    last_sent_time_ = millis();
-    is_dirty_ = false;
+  if (!udp_.beginPacket(target_ip, port_)) {
+    ++tx_errors_;
+    ESP_LOGE(TAG, "UDP beginPacket failed");
+    return;
+  }
+
+  const size_t header_written =
+      udp_.write(header, NETVAR_HEADER_SIZE);
+
+  const size_t payload_written =
+      udp_.write(tx_buffer_.data(), payload_size_);
+
+  const int result = udp_.endPacket();
+
+  if (header_written != NETVAR_HEADER_SIZE ||
+      payload_written != payload_size_ ||
+      result != 1) {
+
+    ++tx_errors_;
+    ESP_LOGE(TAG, "UDP transmission failed");
+    return;
+  }
+
+  ++tx_packets_;
+  ++sequence_counter_;
+
+  last_sent_time_ = millis();
+  is_dirty_ = false;
+
+  ESP_LOGD(
+      TAG,
+      "TX %s:%u ID=%u variables=%u size=%u",
+      ip_address_.c_str(),
+      port_,
+      list_id_,
+      var_count_,
+      static_cast<unsigned>(total_length));
 }
 
-} // namespace wago_netvar
-} // namespace esphome
+std::string WagoNetVarComponent::format_hex_(
+    const uint8_t *data,
+    size_t length) const {
+
+  std::string result;
+  char buffer[4];
+
+  for (size_t i = 0; i < length; ++i) {
+    std::snprintf(buffer, sizeof(buffer), "%02X", data[i]);
+
+    if (!result.empty())
+      result += ' ';
+
+    result += buffer;
+  }
+
+  return result;
+}
+
+}  // namespace wago_netvar
+}  // namespace esphome
