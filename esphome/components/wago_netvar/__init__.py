@@ -21,7 +21,7 @@ from esphome.const import (
 DEPENDENCIES = ["wifi"]
 MULTI_CONF = True
 
-MAX_UDP_PACKET_SIZE = 1500
+MAX_UDP_PACKET_SIZE = 1472
 NETVAR_HEADER_SIZE = 20
 MAX_PAYLOAD_SIZE = MAX_UDP_PACKET_SIZE - NETVAR_HEADER_SIZE
 
@@ -67,7 +67,6 @@ SUPPORTED_TYPES = {
     "DINT",
     "TIME",
     "REAL",
-    "LREAL",
 }
 
 INTEGER_TYPES = {
@@ -83,7 +82,7 @@ INTEGER_TYPES = {
     "TIME",
 }
 
-FLOAT_TYPES = {"REAL", "LREAL"}
+FLOAT_TYPES = {"REAL"}
 
 VARIABLE_SCHEMA = cv.Schema(
     {
@@ -144,16 +143,11 @@ def validate_variable_type(value):
 
         return f"STRING({length})"
 
-    raise cv.Invalid(
-        f"Unsupported NetVar type: {value}"
-    )
+    raise cv.Invalid(f"Unsupported NetVar type: {value}")
 
 
 def get_type_size(type_name):
-    if type_name == "BOOL":
-        return 1
-
-    if type_name in {"BYTE", "USINT", "SINT"}:
+    if type_name in {"BOOL", "BYTE", "USINT", "SINT"}:
         return 1
 
     if type_name in {"WORD", "UINT", "INT"}:
@@ -167,9 +161,6 @@ def get_type_size(type_name):
         "REAL",
     }:
         return 4
-
-    if type_name == "LREAL":
-        return 8
 
     if type_name.startswith("STRING("):
         return int(type_name[7:-1]) + 1
@@ -190,35 +181,72 @@ def get_type_alignment(type_name):
     if type_name == "REAL":
         return 2
 
-    if type_name == "LREAL":
-        return 8
-
     return 1
+
+
+def calculate_payload_size(variables, pack_bools, alignment):
+    offset = 0
+    bool_bit_index = 0
+
+    for variable in variables:
+        variable_type = variable[CONF_VAR_TYPE]
+
+        if variable_type != "BOOL" and bool_bit_index > 0:
+            offset += 1
+            bool_bit_index = 0
+
+        if variable_type == "BOOL" and pack_bools:
+            bool_bit_index += 1
+
+            if bool_bit_index >= 8:
+                bool_bit_index = 0
+                offset += 1
+
+            continue
+
+        if alignment:
+            type_alignment = get_type_alignment(variable_type)
+            remainder = offset % type_alignment
+
+            if remainder:
+                offset += type_alignment - remainder
+
+        offset += get_type_size(variable_type)
+
+        if offset > MAX_PAYLOAD_SIZE:
+            raise cv.Invalid(
+                f"NetVar payload exceeds {MAX_PAYLOAD_SIZE} bytes"
+            )
+
+    if bool_bit_index:
+        offset += 1
+
+    if offset > MAX_PAYLOAD_SIZE:
+        raise cv.Invalid(
+            f"NetVar payload exceeds {MAX_PAYLOAD_SIZE} bytes"
+        )
+
+    return offset
 
 
 def validate_config(config):
     direction = config[CONF_DIRECTION]
-
     variables = config.get(CONF_VARIABLES, [])
 
     if not variables:
-        raise cv.Invalid(
-            "At least one variable must be defined"
-        )
+        raise cv.Invalid("At least one variable must be defined")
 
     names = set()
     normalized_variables = []
 
     for variable in variables:
-        name = variable[CONF_VAR_NAME]
+        name = variable[CONF_VAR_NAME].strip()
 
         if not name:
             raise cv.Invalid("Variable name cannot be empty")
 
         if name in names:
-            raise cv.Invalid(
-                f"Duplicate variable name: {name}"
-            )
+            raise cv.Invalid(f"Duplicate variable name: {name}")
 
         names.add(name)
 
@@ -235,46 +263,18 @@ def validate_config(config):
 
     config[CONF_VARIABLES] = normalized_variables
 
-    offset = 0
-    bool_bit_index = 0
-
-    for variable in normalized_variables:
-        variable_type = variable[CONF_VAR_TYPE]
-
-        if variable_type != "BOOL" and bool_bit_index > 0:
-            offset += 1
-            bool_bit_index = 0
-
-        if variable_type == "BOOL" and config[CONF_PACK_BOOLS]:
-            bool_bit_index += 1
-
-            if bool_bit_index >= 8:
-                bool_bit_index = 0
-                offset += 1
-
-            continue
-
-        if config[CONF_ALIGNMENT]:
-            alignment = get_type_alignment(variable_type)
-            remainder = offset % alignment
-
-            if remainder:
-                offset += alignment - remainder
-
-        offset += get_type_size(variable_type)
-
-    if bool_bit_index:
-        offset += 1
-
-    if offset + NETVAR_HEADER_SIZE > MAX_UDP_PACKET_SIZE:
-        raise cv.Invalid(
-            f"NetVar packet exceeds {MAX_UDP_PACKET_SIZE} bytes"
-        )
+    calculate_payload_size(
+        normalized_variables,
+        config[CONF_PACK_BOOLS],
+        config[CONF_ALIGNMENT],
+    )
 
     variable_map = {
         variable[CONF_VAR_NAME]: variable[CONF_VAR_TYPE]
         for variable in normalized_variables
     }
+
+    mapped_variables = set()
 
     mappings = (
         (CONF_SENSORS, FLOAT_TYPES | INTEGER_TYPES),
@@ -294,19 +294,25 @@ def validate_config(config):
                     "is not defined in variables"
                 )
 
+            if variable_name in mapped_variables:
+                raise cv.Invalid(
+                    f"Variable '{variable_name}' is mapped more than once"
+                )
+
             variable_type = variable_map[variable_name]
 
             if mapping_name == CONF_TEXT_SENSORS:
                 if not variable_type.startswith("STRING("):
                     raise cv.Invalid(
-                        f"Text sensor '{variable_name}' "
-                        "requires STRING type"
+                        f"Text sensor '{variable_name}' requires STRING type"
                     )
             elif variable_type not in allowed_types:
                 raise cv.Invalid(
                     f"Entity '{variable_name}' has incompatible "
                     f"type '{variable_type}' in {mapping_name}"
                 )
+
+            mapped_variables.add(variable_name)
 
     read_entities = (
         config.get(CONF_SENSORS, [])
@@ -329,14 +335,14 @@ def validate_config(config):
             "direction 'write' cannot contain sensors or text_sensors"
         )
 
-    if config[CONF_VAR_COUNT] > 0:
-        if config[CONF_VAR_COUNT] != len(normalized_variables):
-            raise cv.Invalid(
-                "var_count must match the number of defined variables"
-            )
+    actual_var_count = len(normalized_variables)
 
-    if config[CONF_VAR_COUNT] == 0:
-        config[CONF_VAR_COUNT] = len(normalized_variables)
+    if config[CONF_VAR_COUNT] not in (0, actual_var_count):
+        raise cv.Invalid(
+            "var_count must match the number of defined variables"
+        )
+
+    config[CONF_VAR_COUNT] = actual_var_count
 
     return config
 
