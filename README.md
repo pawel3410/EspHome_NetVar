@@ -20,13 +20,15 @@ The component supports ESP32 and ESP8266 platforms using the Arduino framework.
 - Periodic transmission.
 - Optional transmission on value change.
 - UDP packet validation.
-- Source IP and port validation.
-- Packet size limited to 1500 bytes.
-- Internal RX/TX diagnostics.
+- Source IP and UDP port validation in read mode.
+- Maximum UDP datagram size of 1472 bytes.
+- Internal RX/TX diagnostic counters.
 
 ## Communication modes
 
 The component supports two mutually exclusive modes.
+
+The `both` mode is not supported.
 
 ### Read mode
 
@@ -38,11 +40,18 @@ The component receives UDP packets from the configured PLC.
 
 Supported entities:
 
-- sensor
-- binary_sensor
-- text_sensor
+- `sensor`
+- `binary_sensor`
+- `text_sensor`
 
 The component does not send NetVar packets in this mode.
+
+In read mode, `ip_address` and `port` identify the expected source of incoming packets:
+
+- `ip_address` is the PLC source IP address.
+- `port` is the PLC source UDP port and the local UDP listening port.
+
+The PLC must send packets from the configured source port.
 
 ### Write mode
 
@@ -54,12 +63,15 @@ The component sends UDP packets to the configured PLC.
 
 Supported entities:
 
-- switch
-- number
+- `switch`
+- `number`
 
 The component does not process incoming NetVar packets in this mode.
 
-The `both` mode is not supported.
+In write mode:
+
+- `ip_address` is the PLC destination IP address.
+- `port` is the PLC destination UDP port.
 
 ## Installation
 
@@ -92,11 +104,11 @@ external_components:
 |---|---|---|---|
 | id | ID | Required | Component identifier |
 | ip_address | IPv4 | Required | PLC IP address |
-| port | uint16 | 1202 | UDP destination and listening port |
+| port | uint16 | 1202 | PLC UDP port; listening/source port in read mode, destination port in write mode |
 | list_ID | uint16 | 1 | NetVar list identifier |
 | var_count | uint16 | 0 | Variable count; 0 means automatic |
-| direction | string | write | read or write |
-| endian | string | little | little or big |
+| direction | string | write | `read` or `write` |
+| endian | string | little | `little` or `big` |
 | pack_bools | bool | false | Pack BOOL values into bits |
 | alignment | bool | false | Align variables in memory |
 | update_interval | time | 10s | Periodic transmission interval |
@@ -123,14 +135,17 @@ external_components:
 | DWORD | 4 bytes | Unsigned 32-bit |
 | UDINT | 4 bytes | Unsigned 32-bit |
 | DINT | 4 bytes | Signed 32-bit |
-| TIME | 4 bytes | Unsigned 32-bit time value |
+| TIME | 4 bytes | 32-bit time value |
 | REAL | 4 bytes | IEEE-754 float |
-| LREAL | 8 bytes | IEEE-754 double |
 | STRING(n) | n+1 bytes | Null-terminated string |
 
-STRING without an explicit length defaults to STRING(80).
+`LREAL` is not supported.
+
+STRING without an explicit length defaults to `STRING(80)`.
 
 Supported STRING lengths are 1 to 255 characters.
+
+The component reserves one additional byte for the terminating null character.
 
 ## Packet format
 
@@ -138,7 +153,7 @@ Every UDP packet contains a 20-byte header followed by a payload.
 
 | Offset | Size | Field |
 |---|---:|---|
-| 0 | 4 | Magic bytes: 00 2D 53 33 |
+| 0 | 4 | Magic bytes: `00 2D 53 33` |
 | 4 | 4 | Reserved |
 | 8 | 2 | list_ID |
 | 10 | 2 | Reserved |
@@ -152,23 +167,23 @@ The byte order of 16-bit header fields follows the configured endian setting.
 
 The sequence counter is incremented for each successfully transmitted packet.
 
-The receiver does not currently use the sequence counter to detect missing or duplicated packets.
+The receiver does not use the sequence counter to detect missing or duplicated packets.
 
 ## Packet size
 
-The maximum supported UDP packet size is 1500 bytes.
+The maximum supported UDP datagram size is 1472 bytes.
 
 The header occupies 20 bytes.
 
 Therefore, the maximum payload size is:
 
 ```text
-1500 - 20 = 1480 bytes
+1472 - 20 = 1452 bytes
 ```
 
 The configuration validator checks the calculated payload size.
 
-The receiver rejects packets larger than 1500 bytes.
+The receiver rejects packets larger than 1472 bytes.
 
 The receiver also checks:
 
@@ -340,9 +355,11 @@ The component maintains internal counters for:
 - Transmit errors.
 - Rejected packets.
 
-Debug logging can be enabled using the ESPHome logger configuration.
+These counters are available through the component's C++ getter methods.
 
-Example:
+They are not currently exposed as ESPHome sensor entities.
+
+Debug logging can be enabled using the ESPHome logger configuration:
 
 ```yaml
 logger:
@@ -352,14 +369,15 @@ logger:
 ## Important limitations
 
 - Only one communication direction is supported per component instance.
-- The configured PLC IP and UDP port are used to validate incoming packet sources.
+- `both` mode is not supported.
+- The configured PLC IP and UDP port are used to validate incoming packet sources in read mode.
 - The PLC must use the configured source UDP port in read mode.
 - STRING uses a null-terminated representation.
 - Numeric ESPHome sensors use float values. Large integer values can therefore lose precision when published.
-- ESPHome number entities use float values and cannot represent all 64-bit integer values exactly.
-- LREAL is decoded internally as double, but ESPHome sensor entities publish float.
+- ESPHome number entities use float values and cannot represent all 32-bit integer values exactly.
 - The sequence counter is transmitted but not used for packet ordering validation.
-- The maximum complete UDP packet size is 1500 bytes.
+- The maximum complete UDP datagram size is 1472 bytes.
+- The component does not currently expose a configurable receive timeout or a dedicated stale-data binary sensor.
 
 ## Compatibility
 
