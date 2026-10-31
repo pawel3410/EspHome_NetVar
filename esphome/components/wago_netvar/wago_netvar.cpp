@@ -1,7 +1,8 @@
-
 #include "wago_netvar.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -91,7 +92,6 @@ bool WagoNetVarComponent::get_type_info(
     size = 4;
     alignment = 2;
   } else if (type.rfind("STRING(", 0) == 0 &&
-             type.size() > 8 &&
              type.back() == ')') {
 
     const std::string length_text =
@@ -101,7 +101,8 @@ bool WagoNetVarComponent::get_type_info(
       return false;
 
     char *end = nullptr;
-    const unsigned long length =
+
+    unsigned long length =
         std::strtoul(length_text.c_str(), &end, 10);
 
     if (end == nullptr || *end != '\0' ||
@@ -119,7 +120,8 @@ bool WagoNetVarComponent::get_type_info(
 
 void WagoNetVarComponent::add_variable(
     const std::string &name,
-    const std::string &type) {
+    const std::string &type,
+    int byte_offset) {
 
   if (name.empty()) {
     ESP_LOGE(TAG, "Variable name cannot be empty");
@@ -127,24 +129,42 @@ void WagoNetVarComponent::add_variable(
     return;
   }
 
-  if (variable_indices_.find(name) != variable_indices_.end()) {
+  if (get_var(name) != nullptr) {
     ESP_LOGE(TAG, "Duplicate variable: %s", name.c_str());
     mark_failed();
     return;
   }
 
   VarDef var;
+
   var.name = name;
   var.type_name = type;
 
-  if (!get_type_info(type, var.type, var.size, var.alignment)) {
+  if (!get_type_info(
+          type,
+          var.type,
+          var.size,
+          var.alignment)) {
+
     ESP_LOGE(
         TAG,
         "Unsupported variable type: %s (%s)",
         type.c_str(),
         name.c_str());
+
     mark_failed();
     return;
+  }
+
+  if (byte_offset < -1) {
+    ESP_LOGE(TAG, "Invalid byte_offset for %s", name.c_str());
+    mark_failed();
+    return;
+  }
+
+  if (byte_offset >= 0) {
+    var.has_manual_offset = true;
+    var.byte_offset = static_cast<size_t>(byte_offset);
   }
 
   if (variables_.size() >= NETVAR_MAX_PAYLOAD_SIZE) {
@@ -153,23 +173,18 @@ void WagoNetVarComponent::add_variable(
     return;
   }
 
-  const size_t index = variables_.size();
   variables_.push_back(var);
-  variable_indices_.emplace(name, index);
 }
 
 VarDef *WagoNetVarComponent::get_var(
     const std::string &name) {
 
-  const auto it = variable_indices_.find(name);
+  for (auto &var : variables_) {
+    if (var.name == name)
+      return &var;
+  }
 
-  if (it == variable_indices_.end())
-    return nullptr;
-
-  if (it->second >= variables_.size())
-    return nullptr;
-
-  return &variables_[it->second];
+  return nullptr;
 }
 
 #ifdef USE_SENSOR
@@ -179,10 +194,15 @@ void WagoNetVarComponent::register_sensor(
 
   VarDef *var = get_var(name);
 
-  if (var == nullptr || entity == nullptr ||
-      var->type == VariableType::BOOL ||
+  if (var == nullptr || entity == nullptr) {
+    ESP_LOGE(TAG, "Invalid sensor mapping: %s", name.c_str());
+    mark_failed();
+    return;
+  }
+
+  if (var->type == VariableType::BOOL ||
       var->type == VariableType::STRING) {
-    ESP_LOGE(TAG, "Invalid numeric sensor mapping: %s", name.c_str());
+    ESP_LOGE(TAG, "Invalid numeric sensor type: %s", name.c_str());
     mark_failed();
     return;
   }
@@ -206,6 +226,7 @@ void WagoNetVarComponent::register_binary_sensor(
 
   if (var == nullptr || entity == nullptr ||
       var->type != VariableType::BOOL) {
+
     ESP_LOGE(TAG, "Invalid binary sensor mapping: %s", name.c_str());
     mark_failed();
     return;
@@ -230,6 +251,7 @@ void WagoNetVarComponent::register_text_sensor(
 
   if (var == nullptr || entity == nullptr ||
       var->type != VariableType::STRING) {
+
     ESP_LOGE(TAG, "Invalid text sensor mapping: %s", name.c_str());
     mark_failed();
     return;
@@ -254,6 +276,7 @@ void WagoNetVarComponent::register_switch(
 
   if (var == nullptr || entity == nullptr ||
       var->type != VariableType::BOOL) {
+
     ESP_LOGE(TAG, "Invalid switch mapping: %s", name.c_str());
     mark_failed();
     return;
@@ -279,6 +302,7 @@ void WagoNetVarComponent::register_number(
   if (var == nullptr || entity == nullptr ||
       var->type == VariableType::BOOL ||
       var->type == VariableType::STRING) {
+
     ESP_LOGE(TAG, "Invalid number mapping: %s", name.c_str());
     mark_failed();
     return;
@@ -295,53 +319,109 @@ void WagoNetVarComponent::register_number(
 #endif
 
 bool WagoNetVarComponent::calculate_layout_() {
-  size_t offset = 0;
-  uint8_t bool_bit_index = 0;
+  size_t maximum_end = 0;
 
-  for (auto &var : variables_) {
-    if (var.type != VariableType::BOOL && bool_bit_index > 0) {
-      ++offset;
-      bool_bit_index = 0;
-    }
+  for (size_t i = 0; i < variables_.size(); ++i) {
+    VarDef &var = variables_[i];
 
-    if (var.type == VariableType::BOOL && pack_bools_) {
-      var.byte_offset = offset;
-      var.bit_offset = bool_bit_index;
-
-      ++bool_bit_index;
-
-      if (bool_bit_index >= 8) {
-        bool_bit_index = 0;
-        ++offset;
-      }
-
+    if (!var.has_manual_offset)
       continue;
-    }
 
-    if (alignment_ && var.alignment > 1) {
-      const size_t remainder = offset % var.alignment;
-
-      if (remainder != 0)
-        offset += var.alignment - remainder;
-    }
-
-    var.byte_offset = offset;
-    var.bit_offset = 0;
-
-    if (offset > NETVAR_MAX_PAYLOAD_SIZE ||
-        var.size > NETVAR_MAX_PAYLOAD_SIZE - offset)
+    if (var.byte_offset > NETVAR_MAX_PAYLOAD_SIZE ||
+        var.size > NETVAR_MAX_PAYLOAD_SIZE - var.byte_offset) {
+      ESP_LOGE(TAG, "Variable %s exceeds payload size", var.name.c_str());
       return false;
+    }
 
-    offset += var.size;
+    const size_t end = var.byte_offset + var.size;
+
+    for (size_t j = 0; j < i; ++j) {
+      const VarDef &other = variables_[j];
+
+      if (!other.has_manual_offset)
+        continue;
+
+      const size_t other_end = other.byte_offset + other.size;
+
+      if (var.byte_offset < other_end &&
+          other.byte_offset < end) {
+        ESP_LOGE(
+            TAG,
+            "Variables %s and %s overlap",
+            var.name.c_str(),
+            other.name.c_str());
+        return false;
+      }
+    }
+
+    if (end > maximum_end)
+      maximum_end = end;
   }
 
-  if (bool_bit_index > 0)
-    ++offset;
+  size_t cursor = 0;
 
-  if (offset > NETVAR_MAX_PAYLOAD_SIZE)
+  for (auto &var : variables_) {
+    if (var.has_manual_offset)
+      continue;
+
+    if (alignment_ && var.alignment > 1) {
+      const size_t remainder = cursor % var.alignment;
+
+      if (remainder != 0)
+        cursor += var.alignment - remainder;
+    }
+
+    while (true) {
+      bool collision = false;
+      size_t next_cursor = cursor;
+
+      if (cursor > NETVAR_MAX_PAYLOAD_SIZE ||
+          var.size > NETVAR_MAX_PAYLOAD_SIZE - cursor)
+        return false;
+
+      const size_t end = cursor + var.size;
+
+      for (const auto &other : variables_) {
+        if (&other == &var)
+          continue;
+
+        if (other.byte_offset + other.size <= cursor ||
+            other.byte_offset >= end)
+          continue;
+
+        if (other.has_manual_offset ||
+            &other < &var) {
+          collision = true;
+
+          if (other.byte_offset + other.size > next_cursor)
+            next_cursor = other.byte_offset + other.size;
+        }
+      }
+
+      if (!collision)
+        break;
+
+      cursor = next_cursor;
+
+      if (alignment_ && var.alignment > 1) {
+        const size_t remainder = cursor % var.alignment;
+
+        if (remainder != 0)
+          cursor += var.alignment - remainder;
+      }
+    }
+
+    var.byte_offset = cursor;
+    cursor += var.size;
+
+    if (cursor > maximum_end)
+      maximum_end = cursor;
+  }
+
+  if (maximum_end > NETVAR_MAX_PAYLOAD_SIZE)
     return false;
 
-  payload_size_ = offset;
+  payload_size_ = maximum_end;
   return true;
 }
 
@@ -358,7 +438,9 @@ void WagoNetVarComponent::setup() {
     return;
   }
 
-  if (!target_ip_.fromString(ip_address_.c_str())) {
+  IPAddress target_ip;
+
+  if (!target_ip.fromString(ip_address_.c_str())) {
     ESP_LOGE(TAG, "Invalid target IPv4 address");
     mark_failed();
     return;
@@ -369,17 +451,21 @@ void WagoNetVarComponent::setup() {
         TAG,
         "NetVar payload exceeds maximum size of %u bytes",
         static_cast<unsigned>(NETVAR_MAX_PAYLOAD_SIZE));
+
     mark_failed();
     return;
   }
 
-  if (variables_.size() > UINT16_MAX ||
-      var_count_ != variables_.size()) {
+  const uint16_t actual_var_count =
+      static_cast<uint16_t>(variables_.size());
+
+  if (var_count_ != actual_var_count) {
     ESP_LOGE(
         TAG,
         "var_count mismatch: configured=%u actual=%u",
         var_count_,
-        static_cast<unsigned>(variables_.size()));
+        actual_var_count);
+
     mark_failed();
     return;
   }
@@ -387,7 +473,7 @@ void WagoNetVarComponent::setup() {
   tx_buffer_.assign(payload_size_, 0);
 
   if (tx_buffer_.size() != payload_size_) {
-    ESP_LOGE(TAG, "Unable to allocate NetVar TX buffer");
+    ESP_LOGE(TAG, "Unable to allocate NetVar buffer");
     mark_failed();
     return;
   }
@@ -411,6 +497,16 @@ void WagoNetVarComponent::setup() {
       static_cast<unsigned>(payload_size_),
       enable_read_ ? "read" : "write",
       big_endian_ ? "big" : "little");
+
+  for (const auto &var : variables_) {
+    ESP_LOGD(
+        TAG,
+        "Variable %s type=%s offset=%u size=%u",
+        var.name.c_str(),
+        var.type_name.c_str(),
+        static_cast<unsigned>(var.byte_offset),
+        static_cast<unsigned>(var.size));
+  }
 }
 
 uint16_t WagoNetVarComponent::read_u16_(
@@ -457,8 +553,7 @@ bool WagoNetVarComponent::write_integer_(
     VarDef &var,
     uint64_t value) {
 
-  if (var.byte_offset > tx_buffer_.size() ||
-      var.size > tx_buffer_.size() - var.byte_offset)
+  if (var.byte_offset + var.size > tx_buffer_.size())
     return false;
 
   bool changed = false;
@@ -500,13 +595,8 @@ void WagoNetVarComponent::set_variable_value(
   if (var->byte_offset >= tx_buffer_.size())
     return;
 
-  const uint8_t mask =
-      static_cast<uint8_t>(1U << var->bit_offset);
-
+  const uint8_t updated = value ? 1 : 0;
   uint8_t &destination = tx_buffer_[var->byte_offset];
-
-  const uint8_t updated =
-      value ? destination | mask : destination & static_cast<uint8_t>(~mask);
 
   if (destination != updated) {
     destination = updated;
@@ -524,8 +614,10 @@ void WagoNetVarComponent::set_variable_value(
 
   VarDef *var = get_var(name);
 
-  if (var == nullptr || !enable_write_ ||
-      var->type == VariableType::BOOL ||
+  if (var == nullptr || !enable_write_)
+    return;
+
+  if (var->type == VariableType::BOOL ||
       var->type == VariableType::REAL ||
       var->type == VariableType::STRING)
     return;
@@ -533,6 +625,7 @@ void WagoNetVarComponent::set_variable_value(
   int64_t signed_min = 0;
   int64_t signed_max = 0;
   uint64_t unsigned_max = 0;
+
   bool is_signed = false;
 
   switch (var->type) {
@@ -563,8 +656,7 @@ void WagoNetVarComponent::set_variable_value(
   }
 
   if (is_signed) {
-    if (static_cast<int64_t>(value) < signed_min ||
-        static_cast<int64_t>(value) > signed_max) {
+    if (value < signed_min || value > signed_max) {
       ESP_LOGW(TAG, "Value out of range for %s", name.c_str());
       return;
     }
@@ -576,8 +668,9 @@ void WagoNetVarComponent::set_variable_value(
     }
   }
 
-  write_integer_(*var, static_cast<uint64_t>(
-      static_cast<int64_t>(value)));
+  write_integer_(
+      *var,
+      static_cast<uint64_t>(static_cast<int64_t>(value)));
 }
 
 void WagoNetVarComponent::set_variable_value(
@@ -601,13 +694,6 @@ void WagoNetVarComponent::set_variable_value(
       var->type == VariableType::STRING)
     return;
 
-  const double numeric_value = static_cast<double>(value);
-
-  const bool signed_type =
-      var->type == VariableType::SINT ||
-      var->type == VariableType::INT ||
-      var->type == VariableType::DINT;
-
   const double minimum =
       var->type == VariableType::SINT ? INT8_MIN :
       var->type == VariableType::INT ? INT16_MIN :
@@ -620,17 +706,25 @@ void WagoNetVarComponent::set_variable_value(
       var->size == 1 ? UINT8_MAX :
       var->size == 2 ? UINT16_MAX : UINT32_MAX;
 
-  if (numeric_value < minimum || numeric_value > maximum) {
+  if (static_cast<double>(value) < minimum ||
+      static_cast<double>(value) > maximum) {
     ESP_LOGW(TAG, "Value out of range for %s", name.c_str());
     return;
   }
 
-  if (signed_type) {
+  if (var->type == VariableType::SINT ||
+      var->type == VariableType::INT ||
+      var->type == VariableType::DINT) {
+
     write_integer_(
         *var,
-        static_cast<uint64_t>(static_cast<int64_t>(value)));
+        static_cast<uint64_t>(
+            static_cast<int64_t>(value)));
+
   } else {
-    write_integer_(*var, static_cast<uint64_t>(value));
+    write_integer_(
+        *var,
+        static_cast<uint64_t>(value));
   }
 }
 
@@ -657,18 +751,16 @@ void WagoNetVarComponent::set_variable_value(
   }
 
   if (var->type == VariableType::STRING) {
-    if (var->byte_offset > tx_buffer_.size() ||
-        var->size > tx_buffer_.size() - var->byte_offset)
+    if (var->byte_offset + var->size > tx_buffer_.size())
       return;
 
     bool changed = false;
-    const size_t max_chars = var->size - 1;
-    const size_t copy_length =
-        value.size() < max_chars ? value.size() : max_chars;
 
     for (size_t i = 0; i < var->size; ++i) {
       const uint8_t byte =
-          i < copy_length ? static_cast<uint8_t>(value[i]) : 0;
+          i < value.size() && i < var->size - 1
+              ? static_cast<uint8_t>(value[i])
+              : 0;
 
       uint8_t &destination =
           tx_buffer_[var->byte_offset + i];
@@ -688,17 +780,12 @@ void WagoNetVarComponent::set_variable_value(
   }
 
   char *end = nullptr;
-  const double numeric_value = std::strtod(value.c_str(), &end);
+  const double numeric_value =
+      std::strtod(value.c_str(), &end);
 
   if (end == value.c_str() || end == nullptr ||
       *end != '\0' || !std::isfinite(numeric_value)) {
     ESP_LOGW(TAG, "Invalid numeric value for %s", name.c_str());
-    return;
-  }
-
-  if (numeric_value < -2147483648.0 ||
-      numeric_value > 4294967295.0) {
-    ESP_LOGW(TAG, "Value out of range for %s", name.c_str());
     return;
   }
 
@@ -713,13 +800,11 @@ std::string WagoNetVarComponent::get_variable_value(
   if (var == nullptr)
     return "";
 
-  if (var->byte_offset > tx_buffer_.size() ||
-      var->size > tx_buffer_.size() - var->byte_offset)
+  if (var->byte_offset + var->size > tx_buffer_.size())
     return "";
 
   if (var->type == VariableType::BOOL) {
-    return (tx_buffer_[var->byte_offset] &
-            (1U << var->bit_offset)) ? "1" : "0";
+    return tx_buffer_[var->byte_offset] != 0 ? "1" : "0";
   }
 
   if (var->type == VariableType::STRING) {
@@ -739,7 +824,7 @@ std::string WagoNetVarComponent::get_variable_value(
       read_integer_(&tx_buffer_[var->byte_offset], var->size);
 
   if (var->type == VariableType::REAL) {
-    const uint32_t bits = static_cast<uint32_t>(raw);
+    uint32_t bits = static_cast<uint32_t>(raw);
     float value = 0;
     std::memcpy(&value, &bits, sizeof(value));
     return std::to_string(value);
@@ -813,11 +898,12 @@ void WagoNetVarComponent::loop() {
 
         ESP_LOGW(TAG, "Rejected oversized UDP packet: %d bytes",
                  packet_size);
+
         continue;
       }
 
       const int bytes_read =
-          udp_.read(rx_packet_buffer_, static_cast<size_t>(packet_size));
+          udp_.read(rx_packet_buffer_.data(), packet_size);
 
       if (bytes_read != packet_size) {
         ++rx_errors_;
@@ -836,7 +922,7 @@ void WagoNetVarComponent::loop() {
       ++rx_packets_;
 
       unpack_payload_(
-          rx_packet_buffer_ + NETVAR_HEADER_SIZE,
+          rx_packet_buffer_.data() + NETVAR_HEADER_SIZE,
           static_cast<size_t>(packet_size) - NETVAR_HEADER_SIZE);
     }
   }
@@ -856,20 +942,24 @@ bool WagoNetVarComponent::validate_packet_(
 
   if (packet_size < NETVAR_HEADER_SIZE ||
       packet_size > NETVAR_MAX_PACKET_SIZE) {
+
     ESP_LOGW(TAG, "Invalid UDP packet size");
     return false;
   }
 
-  if (remote_ip != target_ip_ || remote_port != port_) {
+  if (remote_ip.toString() != ip_address_ ||
+      remote_port != port_) {
+
     ESP_LOGW(
         TAG,
         "Rejected packet from %s:%u",
         remote_ip.toString().c_str(),
         remote_port);
+
     return false;
   }
 
-  const uint8_t *header = rx_packet_buffer_;
+  const uint8_t *header = rx_packet_buffer_.data();
 
   for (size_t i = 0; i < 4; ++i) {
     if (header[i] != MAGIC_BYTES[i]) {
@@ -888,6 +978,7 @@ bool WagoNetVarComponent::validate_packet_(
         "Invalid list_ID: received=%u expected=%u",
         packet_list_id,
         list_id_);
+
     return false;
   }
 
@@ -897,6 +988,7 @@ bool WagoNetVarComponent::validate_packet_(
         "Invalid var_count: received=%u expected=%u",
         packet_var_count,
         var_count_);
+
     return false;
   }
 
@@ -906,6 +998,7 @@ bool WagoNetVarComponent::validate_packet_(
         "Invalid declared packet length: received=%u actual=%u",
         declared_length,
         static_cast<unsigned>(packet_size));
+
     return false;
   }
 
@@ -915,6 +1008,7 @@ bool WagoNetVarComponent::validate_packet_(
         "Invalid payload length: received=%u expected=%u",
         static_cast<unsigned>(packet_size - NETVAR_HEADER_SIZE),
         static_cast<unsigned>(payload_size_));
+
     return false;
   }
 
@@ -929,8 +1023,7 @@ void WagoNetVarComponent::unpack_payload_(
     return;
 
   for (auto &var : variables_) {
-    if (var.byte_offset > length ||
-        var.size > length - var.byte_offset)
+    if (var.byte_offset + var.size > length)
       continue;
 
     publish_variable_(var, payload);
@@ -944,8 +1037,7 @@ void WagoNetVarComponent::publish_variable_(
   const uint8_t *data = payload + var.byte_offset;
 
   if (var.type == VariableType::BOOL) {
-    const bool value =
-        (data[0] & (1U << var.bit_offset)) != 0;
+    const bool value = data[0] != 0;
 
 #ifdef USE_BINARY_SENSOR
     if (var.binary_sensor_ptr != nullptr)
@@ -974,6 +1066,7 @@ void WagoNetVarComponent::publish_variable_(
   }
 
   const uint64_t raw = read_integer_(data, var.size);
+
   double value = 0;
 
   if (var.type == VariableType::REAL) {
@@ -1026,11 +1119,20 @@ void WagoNetVarComponent::send_packet_() {
       payload_size_ > NETVAR_MAX_PAYLOAD_SIZE)
     return;
 
+  IPAddress target_ip;
+
+  if (!target_ip.fromString(ip_address_.c_str())) {
+    ++tx_errors_;
+    ESP_LOGE(TAG, "Invalid target IP address");
+    return;
+  }
+
   const size_t total_length =
       NETVAR_HEADER_SIZE + payload_size_;
 
   if (total_length > NETVAR_MAX_PACKET_SIZE ||
       total_length > UINT16_MAX) {
+
     ++tx_errors_;
     ESP_LOGE(TAG, "NetVar packet exceeds maximum size");
     return;
@@ -1045,7 +1147,7 @@ void WagoNetVarComponent::send_packet_() {
   write_u16_(&header[14], static_cast<uint16_t>(total_length));
   write_u16_(&header[16], sequence_counter_);
 
-  if (!udp_.beginPacket(target_ip_, port_)) {
+  if (!udp_.beginPacket(target_ip, port_)) {
     ++tx_errors_;
     ESP_LOGE(TAG, "UDP beginPacket failed");
     return;
@@ -1062,6 +1164,7 @@ void WagoNetVarComponent::send_packet_() {
   if (header_written != NETVAR_HEADER_SIZE ||
       payload_written != payload_size_ ||
       result != 1) {
+
     ++tx_errors_;
     ESP_LOGE(TAG, "UDP transmission failed");
     return;
