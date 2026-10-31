@@ -144,12 +144,8 @@ class WagoNetVarComponent : public PollingComponent {
   }
 
   void set_direction(const std::string &direction) {
-    enable_read_ = direction == "read";
-    enable_write_ = direction == "write";
-  }
-
-  void set_big_endian(bool big_endian) {
-    big_endian_ = big_endian;
+    enable_read_ = (direction == "read");
+    enable_write_ = (direction == "write");
   }
 
   void set_alignment(bool align) {
@@ -219,9 +215,7 @@ class WagoNetVarComponent : public PollingComponent {
   bool enable_read_{false};
   bool enable_write_{true};
 
-  bool big_endian_{false};
   bool alignment_{false};
-
   bool send_on_change_{false};
 
   uint32_t min_interval_ms_{100};
@@ -241,13 +235,10 @@ class WagoNetVarComponent : public PollingComponent {
   WiFiUDP udp_;
 
   std::vector<VarDef> variables_;
-
   size_t payload_size_{0};
 
   std::vector<uint8_t> tx_buffer_;
-
-  std::array<uint8_t, NETVAR_MAX_PACKET_SIZE>
-      rx_packet_buffer_{};
+  std::array<uint8_t, NETVAR_MAX_PACKET_SIZE> rx_packet_buffer_{};
 
   VarDef *get_var(const std::string &name);
 
@@ -266,22 +257,15 @@ class WagoNetVarComponent : public PollingComponent {
                        size_t length);
 
   void send_packet_();
-
   void trigger_send_();
 
-  bool write_integer_(VarDef &var,
-                      uint64_t value);
+  bool write_integer_(VarDef &var, uint64_t value);
+  uint64_t read_integer_(const uint8_t *data, size_t size) const;
 
-  uint64_t read_integer_(const uint8_t *data,
-                         size_t size) const;
-
-  void publish_variable_(VarDef &var,
-                         const uint8_t *payload);
+  void publish_variable_(VarDef &var, const uint8_t *payload);
 
   uint16_t read_u16_(const uint8_t *data) const;
-
-  void write_u16_(uint8_t *data,
-                  uint16_t value) const;
+  void write_u16_(uint8_t *data, uint16_t value) const;
 };
 
 }  // namespace wago_netvar
