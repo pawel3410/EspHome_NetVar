@@ -7,6 +7,7 @@ Założenia projektowe:
 - sequence_counter (bajt 16-17) jest odczytywany lecz nie uwzględniany
 - checksum (bajt 18-19) jest odczytywana lecz nie uwzględniana,
 - dokumentacja README.md musi zawierac typy obsługiwanych danych, szczegółową budowe ramki NetVar i pozostałe szczegółowe informacje oraz przykłady
+- projekt ma sie składać z niezbędnej liczby plików, wersja dla esphome ma się uruchamiać także na esp-idf
 
 
 
