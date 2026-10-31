@@ -1,10 +1,12 @@
 Założenia projektowe:
+- obsługiwane dane sa little endian
 - listy write i read, wiele list read i write
 - walidacja listy read po IP nadawcy (jezeli różny od 0.0.0.0), port, list_ID (bajt 8-9), sprawdzenie czy wielkość ramki jest zgodna z frame_size (bajt 14-15),
 - kazda ramka która przejdzie walidacje jest dekodowana,
 - wysyłanie listy na adres IP (możliwy broadcast 255.255.255.255), port, zadeklarowany list_ID,
 - sequence_counter (bajt 16-17) jest odczytywany lecz nie uwzględniany
 - checksum (bajt 18-19) jest odczytywana lecz nie uwzględniana,
+- dokumentacja README.md musi zawierac typy obsługiwanych danych, szczegółową budowe ramki NetVar i pozostałe szczegółowe informacje oraz przykłady
 
 
 
