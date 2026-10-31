@@ -36,7 +36,6 @@ WagoNumber = wago_netvar_ns.class_("WagoNumber", number.Number)
 CONF_LIST_ID = "list_ID"
 CONF_VAR_COUNT = "var_count"
 CONF_DIRECTION = "direction"
-CONF_ENDIAN = "endian"
 CONF_ALIGNMENT = "alignment"
 CONF_SEND_ON_CHANGE = "send_on_change"
 CONF_MIN_INTERVAL = "min_interval"
@@ -53,7 +52,6 @@ CONF_TEXT_SENSORS = "text_sensors"
 CONF_SWITCHES = "switches"
 CONF_NUMBERS = "numbers"
 
-# CODESYS aliases are normalized to their full names.
 TYPE_ALIASES = {
     "TOD": "TIME_OF_DAY",
     "DT": "DATE_AND_TIME",
@@ -136,7 +134,6 @@ NUMBER_SCHEMA = number.number_schema(WagoNumber).extend(
 
 def validate_variable_type(value):
     value = value.strip().upper()
-
     value = TYPE_ALIASES.get(value, value)
 
     if value in SUPPORTED_TYPES:
@@ -151,24 +148,18 @@ def validate_variable_type(value):
         length = int(match.group(1))
 
         if length < 1 or length > 255:
-            raise cv.Invalid(
-                "STRING length must be between 1 and 255"
-            )
+            raise cv.Invalid("STRING length must be between 1 and 255")
 
         return f"STRING({length})"
 
-    raise cv.Invalid(
-        f"Unsupported NetVar type: {value}"
-    )
+    raise cv.Invalid(f"Unsupported NetVar type: {value}")
 
 
 def get_type_size(type_name):
     if type_name in {"BOOL", "BYTE", "USINT", "SINT"}:
         return 1
-
     if type_name in {"WORD", "UINT", "INT"}:
         return 2
-
     if type_name in {
         "DWORD",
         "UDINT",
@@ -180,7 +171,6 @@ def get_type_size(type_name):
         "REAL",
     }:
         return 4
-
     if type_name.startswith("STRING("):
         return int(type_name[7:-1]) + 1
 
@@ -190,10 +180,8 @@ def get_type_size(type_name):
 def get_type_alignment(type_name):
     if type_name in {"BOOL", "BYTE", "USINT", "SINT"}:
         return 1
-
     if type_name in {"WORD", "UINT", "INT"}:
         return 2
-
     if type_name in {
         "DWORD",
         "UDINT",
@@ -204,28 +192,18 @@ def get_type_alignment(type_name):
         "DATE_AND_TIME",
     }:
         return 4
-
     if type_name == "REAL":
         return 2
-
     return 1
 
 
 def get_cpp_type(type_name):
-    """
-    Return the C++ type used by the existing implementation.
-
-    DATE, TIME_OF_DAY and DATE_AND_TIME are transmitted as
-    unsigned 32-bit values, so the existing UDINT implementation
-    can encode and decode them without changing the payload format.
-    """
     if type_name in {
         "DATE",
         "TIME_OF_DAY",
         "DATE_AND_TIME",
     }:
         return "UDINT"
-
     return type_name
 
 
@@ -251,20 +229,13 @@ def calculate_layout(config, variables):
 
         if offset + size > MAX_PAYLOAD_SIZE:
             raise cv.Invalid(
-                f"Variable '{name}' exceeds the maximum payload size "
-                f"of {MAX_PAYLOAD_SIZE} bytes"
+                f"Variable '{name}' exceeds maximum payload size of {MAX_PAYLOAD_SIZE} bytes"
             )
 
         for other_name, other_offset, other_size in reserved:
-            if ranges_overlap(
-                offset,
-                size,
-                other_offset,
-                other_size,
-            ):
+            if ranges_overlap(offset, size, other_offset, other_size):
                 raise cv.Invalid(
-                    f"Variables '{name}' and '{other_name}' "
-                    "occupy overlapping payload bytes"
+                    f"Variables '{name}' and '{other_name}' occupy overlapping payload bytes"
                 )
 
         reserved.append((name, offset, size))
@@ -281,7 +252,6 @@ def calculate_layout(config, variables):
 
         variable_type = variable[CONF_VAR_TYPE]
         size = get_type_size(variable_type)
-
         alignment = (
             get_type_alignment(variable_type)
             if config[CONF_ALIGNMENT]
@@ -290,19 +260,12 @@ def calculate_layout(config, variables):
 
         while True:
             remainder = cursor % alignment
-
             if remainder:
                 cursor += alignment - remainder
 
             collision = None
-
             for other_name, other_offset, other_size in reserved:
-                if ranges_overlap(
-                    cursor,
-                    size,
-                    other_offset,
-                    other_size,
-                ):
+                if ranges_overlap(cursor, size, other_offset, other_size):
                     collision = (other_offset, other_size)
                     break
 
@@ -313,8 +276,7 @@ def calculate_layout(config, variables):
 
         if cursor + size > MAX_PAYLOAD_SIZE:
             raise cv.Invalid(
-                f"Variable '{name}' exceeds the maximum payload size "
-                f"of {MAX_PAYLOAD_SIZE} bytes"
+                f"Variable '{name}' exceeds maximum payload size of {MAX_PAYLOAD_SIZE} bytes"
             )
 
         layout[name] = cursor
@@ -323,9 +285,7 @@ def calculate_layout(config, variables):
         cursor += size
 
     if payload_size > MAX_PAYLOAD_SIZE:
-        raise cv.Invalid(
-            f"NetVar payload exceeds {MAX_PAYLOAD_SIZE} bytes"
-        )
+        raise cv.Invalid(f"NetVar payload exceeds {MAX_PAYLOAD_SIZE} bytes")
 
     return layout, payload_size
 
@@ -335,29 +295,20 @@ def validate_config(config):
     variables = config.get(CONF_VARIABLES, [])
 
     if not variables:
-        raise cv.Invalid(
-            "At least one variable must be defined"
-        )
+        raise cv.Invalid("At least one variable must be defined")
 
     names = set()
     normalized_variables = []
 
     for variable in variables:
         name = variable[CONF_VAR_NAME]
-
         if not name:
             raise cv.Invalid("Variable name cannot be empty")
-
         if name in names:
-            raise cv.Invalid(
-                f"Duplicate variable name: {name}"
-            )
+            raise cv.Invalid(f"Duplicate variable name: {name}")
 
         names.add(name)
-
-        variable_type = validate_variable_type(
-            variable[CONF_VAR_TYPE]
-        )
+        variable_type = validate_variable_type(variable[CONF_VAR_TYPE])
 
         normalized = {
             CONF_VAR_NAME: name,
@@ -370,7 +321,6 @@ def validate_config(config):
         normalized_variables.append(normalized)
 
     config[CONF_VARIABLES] = normalized_variables
-
     calculate_layout(config, normalized_variables)
 
     variable_map = {
@@ -394,28 +344,21 @@ def validate_config(config):
 
             if variable_name not in variable_map:
                 raise cv.Invalid(
-                    f"{mapping_name}: variable '{variable_name}' "
-                    "is not defined in variables"
+                    f"{mapping_name}: variable '{variable_name}' is not defined in variables"
                 )
 
             variable_type = variable_map[variable_name]
 
             if mapping_name == CONF_TEXT_SENSORS:
                 if not variable_type.startswith("STRING("):
-                    raise cv.Invalid(
-                        f"Text sensor '{variable_name}' "
-                        "requires STRING type"
-                    )
+                    raise cv.Invalid(f"Text sensor '{variable_name}' requires STRING type")
             elif variable_type not in allowed_types:
                 raise cv.Invalid(
-                    f"Entity '{variable_name}' has incompatible "
-                    f"type '{variable_type}' in {mapping_name}"
+                    f"Entity '{variable_name}' has incompatible type '{variable_type}' in {mapping_name}"
                 )
 
             if variable_name in mapped_variables:
-                raise cv.Invalid(
-                    f"Variable '{variable_name}' is mapped more than once"
-                )
+                raise cv.Invalid(f"Variable '{variable_name}' is mapped more than once")
 
             mapped_variables[variable_name] = mapping_name
 
@@ -431,20 +374,14 @@ def validate_config(config):
     )
 
     if direction == "read" and write_entities:
-        raise cv.Invalid(
-            "direction 'read' cannot contain switches or numbers"
-        )
+        raise cv.Invalid("direction 'read' cannot contain switches or numbers")
 
     if direction == "write" and read_entities:
-        raise cv.Invalid(
-            "direction 'write' cannot contain sensors or text_sensors"
-        )
+        raise cv.Invalid("direction 'write' cannot contain sensors or text_sensors")
 
     if config[CONF_VAR_COUNT] > 0:
         if config[CONF_VAR_COUNT] != len(normalized_variables):
-            raise cv.Invalid(
-                "var_count must match the number of defined variables"
-            )
+            raise cv.Invalid("var_count must match the number of defined variables")
 
     if config[CONF_VAR_COUNT] == 0:
         config[CONF_VAR_COUNT] = len(normalized_variables)
@@ -463,63 +400,32 @@ CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(WagoNetVarComponent),
-
             cv.Required(CONF_IP_ADDRESS): validate_ip_address,
-
             cv.Optional(CONF_PORT, default=1202): cv.port,
-
             cv.Optional(CONF_LIST_ID, default=1): cv.uint16_t,
-
             cv.Optional(CONF_VAR_COUNT, default=0): cv.uint16_t,
-
             cv.Optional(
                 CONF_DIRECTION,
                 default="write",
             ): cv.one_of("read", "write", lower=True),
-
-            cv.Optional(
-                CONF_ENDIAN,
-                default="little",
-            ): cv.one_of("little", "big", lower=True),
-
             cv.Optional(
                 CONF_ALIGNMENT,
                 default=False,
             ): cv.boolean,
-
             cv.Optional(
                 CONF_SEND_ON_CHANGE,
                 default=False,
             ): cv.boolean,
-
             cv.Optional(
                 CONF_MIN_INTERVAL,
                 default="100ms",
             ): cv.positive_time_period_milliseconds,
-
-            cv.Required(CONF_VARIABLES): cv.ensure_list(
-                VARIABLE_SCHEMA
-            ),
-
-            cv.Optional(CONF_SENSORS): cv.ensure_list(
-                SENSOR_SCHEMA
-            ),
-
-            cv.Optional(CONF_BINARY_SENSORS): cv.ensure_list(
-                BINARY_SENSOR_SCHEMA
-            ),
-
-            cv.Optional(CONF_TEXT_SENSORS): cv.ensure_list(
-                TEXT_SENSOR_SCHEMA
-            ),
-
-            cv.Optional(CONF_SWITCHES): cv.ensure_list(
-                SWITCH_SCHEMA
-            ),
-
-            cv.Optional(CONF_NUMBERS): cv.ensure_list(
-                NUMBER_SCHEMA
-            ),
+            cv.Required(CONF_VARIABLES): cv.ensure_list(VARIABLE_SCHEMA),
+            cv.Optional(CONF_SENSORS): cv.ensure_list(SENSOR_SCHEMA),
+            cv.Optional(CONF_BINARY_SENSORS): cv.ensure_list(BINARY_SENSOR_SCHEMA),
+            cv.Optional(CONF_TEXT_SENSORS): cv.ensure_list(TEXT_SENSOR_SCHEMA),
+            cv.Optional(CONF_SWITCHES): cv.ensure_list(SWITCH_SCHEMA),
+            cv.Optional(CONF_NUMBERS): cv.ensure_list(NUMBER_SCHEMA),
         }
     ).extend(cv.polling_component_schema("10s")),
     validate_config,
@@ -535,18 +441,13 @@ async def to_code(config):
     cg.add(var.set_port(config[CONF_PORT]))
     cg.add(var.set_list_id(config[CONF_LIST_ID]))
     cg.add(var.set_var_count(config[CONF_VAR_COUNT]))
-
     cg.add(var.set_direction(config[CONF_DIRECTION]))
-    cg.add(var.set_big_endian(config[CONF_ENDIAN] == "big"))
-
     cg.add(var.set_alignment(config[CONF_ALIGNMENT]))
-
     cg.add(var.set_send_on_change(config[CONF_SEND_ON_CHANGE]))
     cg.add(var.set_min_interval(config[CONF_MIN_INTERVAL]))
 
     for variable in config[CONF_VARIABLES]:
         byte_offset = variable.get(CONF_BYTE_OFFSET, -1)
-
         cpp_type = get_cpp_type(variable[CONF_VAR_TYPE])
 
         cg.add(
@@ -559,64 +460,22 @@ async def to_code(config):
 
     for entity_config in config.get(CONF_SENSORS, []):
         entity = await sensor.new_sensor(entity_config)
-
-        cg.add(
-            var.register_sensor(
-                entity_config[CONF_VARIABLE],
-                entity,
-            )
-        )
+        cg.add(var.register_sensor(entity_config[CONF_VARIABLE], entity))
 
     for entity_config in config.get(CONF_BINARY_SENSORS, []):
         entity = await binary_sensor.new_binary_sensor(entity_config)
-
-        cg.add(
-            var.register_binary_sensor(
-                entity_config[CONF_VARIABLE],
-                entity,
-            )
-        )
+        cg.add(var.register_binary_sensor(entity_config[CONF_VARIABLE], entity))
 
     for entity_config in config.get(CONF_TEXT_SENSORS, []):
         entity = await text_sensor.new_text_sensor(entity_config)
-
-        cg.add(
-            var.register_text_sensor(
-                entity_config[CONF_VARIABLE],
-                entity,
-            )
-        )
+        cg.add(var.register_text_sensor(entity_config[CONF_VARIABLE], entity))
 
     for entity_config in config.get(CONF_SWITCHES, []):
         entity = await switch.new_switch(entity_config)
-
-        cg.add(
-            entity.set_parent(
-                var,
-                entity_config[CONF_VARIABLE],
-            )
-        )
-
-        cg.add(
-            var.register_switch(
-                entity_config[CONF_VARIABLE],
-                entity,
-            )
-        )
+        cg.add(entity.set_parent(var, entity_config[CONF_VARIABLE]))
+        cg.add(var.register_switch(entity_config[CONF_VARIABLE], entity))
 
     for entity_config in config.get(CONF_NUMBERS, []):
         entity = await number.new_number(entity_config)
-
-        cg.add(
-            entity.set_parent(
-                var,
-                entity_config[CONF_VARIABLE],
-            )
-        )
-
-        cg.add(
-            var.register_number(
-                entity_config[CONF_VARIABLE],
-                entity,
-            )
-        )
+        cg.add(entity.set_parent(var, entity_config[CONF_VARIABLE]))
+        cg.add(var.register_number(entity_config[CONF_VARIABLE], entity))
