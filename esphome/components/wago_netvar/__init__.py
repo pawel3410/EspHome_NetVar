@@ -53,6 +53,12 @@ CONF_TEXT_SENSORS = "text_sensors"
 CONF_SWITCHES = "switches"
 CONF_NUMBERS = "numbers"
 
+# CODESYS aliases are normalized to their full names.
+TYPE_ALIASES = {
+    "TOD": "TIME_OF_DAY",
+    "DT": "DATE_AND_TIME",
+}
+
 SUPPORTED_TYPES = {
     "BOOL",
     "BYTE",
@@ -65,6 +71,9 @@ SUPPORTED_TYPES = {
     "UDINT",
     "DINT",
     "TIME",
+    "DATE",
+    "TIME_OF_DAY",
+    "DATE_AND_TIME",
     "REAL",
 }
 
@@ -79,6 +88,9 @@ INTEGER_TYPES = {
     "UDINT",
     "DINT",
     "TIME",
+    "DATE",
+    "TIME_OF_DAY",
+    "DATE_AND_TIME",
 }
 
 FLOAT_TYPES = {"REAL"}
@@ -125,6 +137,8 @@ NUMBER_SCHEMA = number.number_schema(WagoNumber).extend(
 def validate_variable_type(value):
     value = value.strip().upper()
 
+    value = TYPE_ALIASES.get(value, value)
+
     if value in SUPPORTED_TYPES:
         return value
 
@@ -160,6 +174,9 @@ def get_type_size(type_name):
         "UDINT",
         "DINT",
         "TIME",
+        "DATE",
+        "TIME_OF_DAY",
+        "DATE_AND_TIME",
         "REAL",
     }:
         return 4
@@ -177,7 +194,15 @@ def get_type_alignment(type_name):
     if type_name in {"WORD", "UINT", "INT"}:
         return 2
 
-    if type_name in {"DWORD", "UDINT", "DINT", "TIME"}:
+    if type_name in {
+        "DWORD",
+        "UDINT",
+        "DINT",
+        "TIME",
+        "DATE",
+        "TIME_OF_DAY",
+        "DATE_AND_TIME",
+    }:
         return 4
 
     if type_name == "REAL":
@@ -186,8 +211,29 @@ def get_type_alignment(type_name):
     return 1
 
 
+def get_cpp_type(type_name):
+    """
+    Return the C++ type used by the existing implementation.
+
+    DATE, TIME_OF_DAY and DATE_AND_TIME are transmitted as
+    unsigned 32-bit values, so the existing UDINT implementation
+    can encode and decode them without changing the payload format.
+    """
+    if type_name in {
+        "DATE",
+        "TIME_OF_DAY",
+        "DATE_AND_TIME",
+    }:
+        return "UDINT"
+
+    return type_name
+
+
 def ranges_overlap(start_a, size_a, start_b, size_b):
-    return start_a < start_b + size_b and start_b < start_a + size_a
+    return (
+        start_a < start_b + size_b
+        and start_b < start_a + size_a
+    )
 
 
 def calculate_layout(config, variables):
@@ -210,7 +256,12 @@ def calculate_layout(config, variables):
             )
 
         for other_name, other_offset, other_size in reserved:
-            if ranges_overlap(offset, size, other_offset, other_size):
+            if ranges_overlap(
+                offset,
+                size,
+                other_offset,
+                other_size,
+            ):
                 raise cv.Invalid(
                     f"Variables '{name}' and '{other_name}' "
                     "occupy overlapping payload bytes"
@@ -230,6 +281,7 @@ def calculate_layout(config, variables):
 
         variable_type = variable[CONF_VAR_TYPE]
         size = get_type_size(variable_type)
+
         alignment = (
             get_type_alignment(variable_type)
             if config[CONF_ALIGNMENT]
@@ -245,7 +297,12 @@ def calculate_layout(config, variables):
             collision = None
 
             for other_name, other_offset, other_size in reserved:
-                if ranges_overlap(cursor, size, other_offset, other_size):
+                if ranges_overlap(
+                    cursor,
+                    size,
+                    other_offset,
+                    other_size,
+                ):
                     collision = (other_offset, other_size)
                     break
 
@@ -490,10 +547,12 @@ async def to_code(config):
     for variable in config[CONF_VARIABLES]:
         byte_offset = variable.get(CONF_BYTE_OFFSET, -1)
 
+        cpp_type = get_cpp_type(variable[CONF_VAR_TYPE])
+
         cg.add(
             var.add_variable(
                 variable[CONF_VAR_NAME],
-                variable[CONF_VAR_TYPE],
+                cpp_type,
                 byte_offset,
             )
         )
