@@ -7,10 +7,10 @@
 
 #include <WiFiUdp.h>
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #ifdef USE_SENSOR
@@ -37,7 +37,7 @@ namespace esphome {
 namespace wago_netvar {
 
 static constexpr size_t NETVAR_HEADER_SIZE = 20;
-static constexpr size_t NETVAR_MAX_PACKET_SIZE = 1500;
+static constexpr size_t NETVAR_MAX_PACKET_SIZE = 1472;
 static constexpr size_t NETVAR_MAX_PAYLOAD_SIZE =
     NETVAR_MAX_PACKET_SIZE - NETVAR_HEADER_SIZE;
 
@@ -90,7 +90,6 @@ enum class VariableType : uint8_t {
   DINT,
   TIME,
   REAL,
-  LREAL,
   STRING
 };
 
@@ -206,6 +205,26 @@ class WagoNetVarComponent : public PollingComponent {
 
   std::string get_variable_value(const std::string &name);
 
+  uint32_t get_rx_packets() const {
+    return rx_packets_;
+  }
+
+  uint32_t get_tx_packets() const {
+    return tx_packets_;
+  }
+
+  uint32_t get_rx_errors() const {
+    return rx_errors_;
+  }
+
+  uint32_t get_tx_errors() const {
+    return tx_errors_;
+  }
+
+  uint32_t get_rejected_packets() const {
+    return rejected_packets_;
+  }
+
   void setup() override;
   void loop() override;
   void update() override;
@@ -216,6 +235,7 @@ class WagoNetVarComponent : public PollingComponent {
 
  protected:
   std::string ip_address_;
+  IPAddress target_ip_;
 
   uint16_t port_{1202};
   uint16_t list_id_{1};
@@ -234,7 +254,6 @@ class WagoNetVarComponent : public PollingComponent {
   uint32_t last_sent_time_{0};
 
   bool is_dirty_{false};
-  bool first_rx_done_{false};
   bool udp_started_{false};
 
   uint16_t sequence_counter_{1};
@@ -248,14 +267,12 @@ class WagoNetVarComponent : public PollingComponent {
   WiFiUDP udp_;
 
   std::vector<VarDef> variables_;
+  std::unordered_map<std::string, size_t> variable_indices_;
 
   size_t payload_size_{0};
 
-  std::vector<uint8_t> rx_buffer_;
   std::vector<uint8_t> tx_buffer_;
-
-  std::array<uint8_t, NETVAR_MAX_PACKET_SIZE>
-      rx_packet_buffer_{};
+  uint8_t rx_packet_buffer_[NETVAR_MAX_PACKET_SIZE]{};
 
   VarDef *get_var(const std::string &name);
 
@@ -282,13 +299,6 @@ class WagoNetVarComponent : public PollingComponent {
 
   uint64_t read_integer_(const uint8_t *data,
                          size_t size) const;
-
-  void write_bytes_(uint8_t *destination,
-                    uint64_t value,
-                    size_t size) const;
-
-  std::string format_hex_(const uint8_t *data,
-                          size_t length) const;
 
   void publish_variable_(VarDef &var,
                          const uint8_t *payload);
