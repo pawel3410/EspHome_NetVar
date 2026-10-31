@@ -1,395 +1,230 @@
+# Wago NetVar dla ESPHome
 
-# ESPHome WAGO NetVar Component
+Komponent umożliwia komunikację z kontrolerami WAGO wykorzystującymi
+protokół CoDeSys NetVar UDP (.S3).
 
-Custom ESPHome component for communication with WAGO PLC controllers using the NetVar over UDP protocol.
+Obsługiwane są niezależne listy zmiennych NetVar. Każda lista może mieć
+własną konfigurację, identyfikator, port UDP oraz kierunek komunikacji.
 
-The component supports ESP32 and ESP8266 platforms using the Arduino framework.
+## Funkcje
 
-## Features
+- Odczyt zmiennych z kontrolera WAGO.
+- Zapis zmiennych do kontrolera WAGO.
+- Obsługa wielu niezależnych list NetVar.
+- Automatyczne rozmieszczanie zmiennych w payload.
+- Możliwość ręcznego określania offsetów bajtowych.
+- Obsługa typów BOOL, BYTE, USINT, SINT, WORD, UINT, INT,
+  DWORD, UDINT, DINT, TIME, REAL oraz STRING.
+- Obsługa kolejności bajtów BIG ENDIAN i LITTLE ENDIAN.
+- Publikowanie odczytanych wartości po odebraniu ramki.
+- Kontrola rozmiaru pakietu UDP.
 
-- NetVar communication over UDP.
-- Separate read and write modes.
-- IEC 61131-3 variable types.
-- Little-endian and big-endian byte order.
-- Optional BOOL bit packing.
-- Optional memory alignment.
-- Numeric sensors.
-- Binary sensors.
-- Text sensors for STRING variables.
-- Switches and number entities for writing values.
-- Periodic transmission.
-- Optional transmission on value change.
-- UDP packet validation.
-- Source IP and UDP port validation in read mode.
-- Maximum UDP datagram size of 1472 bytes.
-- Internal RX/TX diagnostic counters.
+## Kierunek komunikacji
 
-## Communication modes
+Każda lista może pracować w jednym z dwóch trybów:
 
-The component supports two mutually exclusive modes.
+- `read` - odbieranie danych z kontrolera WAGO.
+- `write` - wysyłanie danych do kontrolera WAGO.
 
-The `both` mode is not supported.
+Parametr `port` określa port UDP używany przez daną listę:
+- w trybie `read` jest to port nasłuchujący,
+- w trybie `write` jest to port docelowy.
 
-### Read mode
+Nie ma osobnego parametru portu lokalnego i zdalnego.
 
-```yaml
-direction: read
-```
+## Konfiguracja
 
-The component receives UDP packets from the configured PLC.
+Każda lista NetVar jest konfigurowana niezależnie. Możliwe jest
+skonfigurowanie kilku list korzystających z tego samego adresu IP
+i portu UDP, ale posiadających różne identyfikatory.
 
-Supported entities:
+Podstawowe parametry:
 
-- `sensor`
-- `binary_sensor`
-- `text_sensor`
+| Parametr | Opis |
+|---|---|
+| `ip_address` | Adres IP kontrolera WAGO |
+| `port` | Port UDP |
+| `list_ID` | Identyfikator listy NetVar |
+| `var_count` | Liczba zmiennych w liście |
+| `direction` | Kierunek komunikacji: `read` lub `write` |
+| `endian` | Kolejność bajtów danych |
+| `alignment` | Wyrównanie rozmieszczenia zmiennych |
+| `variables` | Definicje zmiennych |
 
-The component does not send NetVar packets in this mode.
+## Obsługiwane typy danych
 
-In read mode, `ip_address` and `port` identify the expected source of incoming packets:
-
-- `ip_address` is the PLC source IP address.
-- `port` is the PLC source UDP port and the local UDP listening port.
-
-The PLC must send packets from the configured source port.
-
-### Write mode
-
-```yaml
-direction: write
-```
-
-The component sends UDP packets to the configured PLC.
-
-Supported entities:
-
-- `switch`
-- `number`
-
-The component does not process incoming NetVar packets in this mode.
-
-In write mode:
-
-- `ip_address` is the PLC destination IP address.
-- `port` is the PLC destination UDP port.
-
-## Installation
-
-Copy the component directory into your ESPHome configuration:
-
-```text
-components/
-  wago_netvar/
-    __init__.py
-    wago_netvar.cpp
-    wago_netvar.h
-```
-
-Alternatively, configure it as an external component in ESPHome.
-
-Example:
-
-```yaml
-external_components:
-  - source:
-      type: local
-      path: components
-    components:
-      - wago_netvar
-```
-
-## Configuration
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| id | ID | Required | Component identifier |
-| ip_address | IPv4 | Required | PLC IP address |
-| port | uint16 | 1202 | PLC UDP port; listening/source port in read mode, destination port in write mode |
-| list_ID | uint16 | 1 | NetVar list identifier |
-| var_count | uint16 | 0 | Variable count; 0 means automatic |
-| direction | string | write | `read` or `write` |
-| endian | string | little | `little` or `big` |
-| pack_bools | bool | false | Pack BOOL values into bits |
-| alignment | bool | false | Align variables in memory |
-| update_interval | time | 10s | Periodic transmission interval |
-| send_on_change | bool | false | Send when a value changes |
-| min_interval | time | 100ms | Minimum interval between transmissions |
-| variables | list | Required | Variable definitions |
-| sensors | list | Optional | Numeric read entities |
-| binary_sensors | list | Optional | BOOL read entities |
-| text_sensors | list | Optional | STRING read entities |
-| switches | list | Optional | BOOL write entities |
-| numbers | list | Optional | Numeric write entities |
-
-## Supported IEC types
-
-| Type | Size | Description |
+| Typ | Rozmiar | Opis |
 |---|---:|---|
-| BOOL | 1 byte | Boolean |
-| BYTE | 1 byte | Unsigned 8-bit |
-| USINT | 1 byte | Unsigned 8-bit |
-| SINT | 1 byte | Signed 8-bit |
-| WORD | 2 bytes | Unsigned 16-bit |
-| UINT | 2 bytes | Unsigned 16-bit |
-| INT | 2 bytes | Signed 16-bit |
-| DWORD | 4 bytes | Unsigned 32-bit |
-| UDINT | 4 bytes | Unsigned 32-bit |
-| DINT | 4 bytes | Signed 32-bit |
-| TIME | 4 bytes | 32-bit time value |
-| REAL | 4 bytes | IEEE-754 float |
-| STRING(n) | n+1 bytes | Null-terminated string |
+| BOOL | 1 bajt | Wartość logiczna |
+| BYTE | 1 bajt | Liczba 8-bitowa bez znaku |
+| USINT | 1 bajt | Liczba 8-bitowa bez znaku |
+| SINT | 1 bajt | Liczba 8-bitowa ze znakiem |
+| WORD | 2 bajty | Liczba 16-bitowa bez znaku |
+| UINT | 2 bajty | Liczba 16-bitowa bez znaku |
+| INT | 2 bajty | Liczba 16-bitowa ze znakiem |
+| DWORD | 4 bajty | Liczba 32-bitowa bez znaku |
+| UDINT | 4 bajty | Liczba 32-bitowa bez znaku |
+| DINT | 4 bajty | Liczba 32-bitowa ze znakiem |
+| TIME | 4 bajty | Wartość czasu |
+| REAL | 4 bajty | Liczba zmiennoprzecinkowa IEEE 754 |
+| STRING(n) | n bajtów | Ciąg znaków o określonej długości |
 
-`LREAL` is not supported.
+Typ LREAL nie jest obsługiwany.
 
-STRING without an explicit length defaults to `STRING(80)`.
+## Typ BOOL
 
-Supported STRING lengths are 1 to 255 characters.
+Wartość BOOL jest zawsze przesyłana i odbierana jako jeden cały bajt.
 
-The component reserves one additional byte for the terminating null character.
+- `0x00` oznacza `false`.
+- Wartość różna od `0x00` oznacza `true`.
 
-## Packet format
+BOOL zajmuje dokładnie jeden bajt w payload.
 
-Every UDP packet contains a 20-byte header followed by a payload.
+Nie jest stosowane adresowanie bitowe. Parametr `bit_offset` nie jest
+potrzebny i nie należy go konfigurować.
 
-| Offset | Size | Field |
-|---|---:|---|
-| 0 | 4 | Magic bytes: `00 2D 53 33` |
-| 4 | 4 | Reserved |
-| 8 | 2 | list_ID |
-| 10 | 2 | Reserved |
-| 12 | 2 | var_count |
-| 14 | 2 | Total packet length |
-| 16 | 2 | Sequence counter |
-| 18 | 2 | Reserved |
-| 20 | Variable | Payload |
+Przykładowo:
 
-The byte order of 16-bit header fields follows the configured endian setting.
+| Zmienna | Offset | Rozmiar |
+|---|---:|---:|
+| REAL | 0 | 4 bajty |
+| BOOL | 4 | 1 bajt |
+| REAL | 6 | 4 bajty |
 
-The sequence counter is incremented for each successfully transmitted packet.
+W powyższym przykładzie BOOL zajmuje bajt o indeksie 4. Kolejna zmienna
+REAL zaczyna się pod offsetem 6, pozostawiając bajt o indeksie 5
+niewykorzystany.
 
-The receiver does not use the sequence counter to detect missing or duplicated packets.
+## Rozmieszczanie zmiennych w payload
 
-## Packet size
+Dostępne są dwa sposoby określania położenia zmiennych.
 
-The maximum supported UDP datagram size is 1472 bytes.
+### Automatyczne rozmieszczanie
 
-The header occupies 20 bytes.
+Jeżeli nie podano `byte_offset`, położenie zmiennej jest wyznaczane
+automatycznie na podstawie kolejności definicji zmiennych, ich rozmiarów
+oraz ustawionego wyrównania.
 
-Therefore, the maximum payload size is:
+Dzięki temu nie trzeba ręcznie obliczać offsetów dla każdej zmiennej.
 
-```text
-1472 - 20 = 1452 bytes
-```
+### Ręczne rozmieszczanie
 
-The configuration validator checks the calculated payload size.
+Można również określić `byte_offset` dla poszczególnych zmiennych.
 
-The receiver rejects packets larger than 1472 bytes.
+Offset jest liczony od początku payload, a nie od początku całego
+pakietu UDP.
 
-The receiver also checks:
+Przykład:
 
-- Magic bytes.
-- Source IP address.
-- Source UDP port.
-- list_ID.
-- var_count.
-- Declared total packet length.
-- Actual payload length.
+| Zmienna | Typ | Offset | Rozmiar |
+|---|---|---:|---:|
+| temperatura | REAL | 0 | 4 bajty |
+| alarm | BOOL | 4 | 1 bajt |
+| licznik | UINT | 6 | 2 bajty |
 
-## Variable layout
+W przypadku ręcznego rozmieszczania należy zadbać o to, aby zakresy
+bajtów poszczególnych zmiennych nie nakładały się na siebie.
 
-Variables are arranged in the order defined in the YAML configuration.
+## Kolejność bajtów
 
-When alignment is enabled, variables are aligned to their configured type alignment.
+Parametr `endian` określa kolejność bajtów wartości zapisanych
+w payload.
 
-When BOOL packing is enabled, consecutive BOOL variables occupy individual bits of the same byte.
+Dostępne ustawienia:
 
-The same layout settings must be used by the PLC and ESPHome.
+- `little` - LITTLE ENDIAN.
+- `big` - BIG ENDIAN.
 
-## Example: Reading data from PLC
+Kolejność bajtów musi odpowiadać konfiguracji kontrolera WAGO
+i pozostałych urządzeń komunikujących się z daną listą.
+
+## Rozmiar pakietu UDP
+
+Maksymalny rozmiar datagramu UDP przy standardowym MTU Ethernet 1500
+bajtów, bez dodatkowych nagłówków IP, wynosi:
+
+**1472 bajty.**
+
+Obliczenie:
+
+| Element | Rozmiar |
+|---|---:|
+| MTU Ethernet | 1500 bajtów |
+| Nagłówek IPv4 | 20 bajtów |
+| Nagłówek UDP | 8 bajtów |
+| Maksymalny datagram UDP | 1472 bajty |
+
+Pakiet NetVar zawiera dodatkowo własny nagłówek protokołu.
+
+Przy założeniu, że nagłówek NetVar ma 20 bajtów, maksymalna przestrzeń
+na dane zmiennych (payload) wynosi:
+
+**1452 bajty.**
+
+| Element | Rozmiar |
+|---|---:|
+| Maksymalny datagram UDP | 1472 bajty |
+| Nagłówek NetVar | 20 bajtów |
+| Maksymalny payload | 1452 bajty |
+
+Limit 1472 bajtów zapobiega przekroczeniu standardowego rozmiaru
+datagramu UDP dla MTU 1500 bajtów i ogranicza ryzyko fragmentacji
+pakietów IP.
+
+W przypadku innego MTU, dodatkowych nagłówków lub tunelowania
+rzeczywisty bezpieczny limit może być mniejszy.
+
+## Przykład konfiguracji
+
+Poniższy przykład przedstawia dwie niezależne listy NetVar.
 
 ```yaml
-esphome:
-  name: wago-reader
-
-esp32:
-  board: esp32dev
-  framework:
-    type: arduino
-
-wifi:
-  ssid: "YOUR_WIFI"
-  password: "YOUR_PASSWORD"
-
-logger:
-
-external_components:
-  - source:
-      type: local
-      path: components
-    components:
-      - wago_netvar
-
 wago_netvar:
-  id: netvar
-  ip_address: "192.168.1.10"
-  port: 1202
-  list_ID: 1
-  direction: read
-  endian: little
-  pack_bools: false
-  alignment: false
+  - id: netvar_read
+    ip_address: 192.168.1.10
+    port: 1202
+    list_ID: 126
+    var_count: 3
+    direction: read
+    endian: little
+    variables:
+      - name: temperatura
+        type: REAL
+        byte_offset: 0
+      - name: alarm
+        type: BOOL
+        byte_offset: 4
+      - name: cisnienie
+        type: REAL
+        byte_offset: 6
 
-  variables:
-    - name: "Actual_Temp"
-      type: REAL
-
-    - name: "Pump_Status"
-      type: BOOL
-
-    - name: "Device_Name"
-      type: STRING(32)
-
-    - name: "Energy_Total"
-      type: UDINT
-
-  sensors:
-    - variable: "Actual_Temp"
-      name: "Actual Temperature"
-      unit_of_measurement: "C"
-      accuracy_decimals: 2
-
-    - variable: "Energy_Total"
-      name: "Energy Total"
-      accuracy_decimals: 0
-
-  binary_sensors:
-    - variable: "Pump_Status"
-      name: "Pump Status"
-
-  text_sensors:
-    - variable: "Device_Name"
-      name: "Device Name"
+  - id: netvar_write
+    ip_address: 192.168.1.10
+    port: 1202
+    list_ID: 127
+    var_count: 2
+    direction: write
+    endian: little
+    variables:
+      - name: zadana_temperatura
+        type: REAL
+        byte_offset: 0
+      - name: zadane_cisnienie
+        type: REAL
+        byte_offset: 4
 ```
 
-## Example: Writing data to PLC
-
-```yaml
-esphome:
-  name: wago-writer
-
-esp32:
-  board: esp32dev
-  framework:
-    type: arduino
-
-wifi:
-  ssid: "YOUR_WIFI"
-  password: "YOUR_PASSWORD"
-
-logger:
-
-external_components:
-  - source:
-      type: local
-      path: components
-    components:
-      - wago_netvar
-
-wago_netvar:
-  id: netvar
-  ip_address: "192.168.1.10"
-  port: 1202
-  list_ID: 2
-  direction: write
-  endian: little
-  pack_bools: false
-  alignment: false
-
-  update_interval: 10s
-  send_on_change: true
-  min_interval: 200ms
-
-  variables:
-    - name: "Pump_Command"
-      type: BOOL
-
-    - name: "Temperature_Setpoint"
-      type: REAL
-
-    - name: "Operating_Mode"
-      type: INT
-
-  switches:
-    - variable: "Pump_Command"
-      name: "Pump Command"
-
-  numbers:
-    - variable: "Temperature_Setpoint"
-      name: "Temperature Setpoint"
-      min_value: 0
-      max_value: 100
-      step: 0.5
-
-    - variable: "Operating_Mode"
-      name: "Operating Mode"
-      min_value: 0
-      max_value: 10
-      step: 1
-```
-
-## var_count
-
-The `var_count` parameter is optional.
-
-When set to zero, the component automatically calculates the number of configured variables.
-
-When explicitly configured, the value must match the number of variables in the YAML definition.
-
-## Diagnostics
-
-The component maintains internal counters for:
-
-- Received packets.
-- Transmitted packets.
-- Receive errors.
-- Transmit errors.
-- Rejected packets.
-
-These counters are available through the component's C++ getter methods.
-
-They are not currently exposed as ESPHome sensor entities.
-
-Debug logging can be enabled using the ESPHome logger configuration:
-
-```yaml
-logger:
-  level: DEBUG
-```
-
-## Important limitations
-
-- Only one communication direction is supported per component instance.
-- `both` mode is not supported.
-- The configured PLC IP and UDP port are used to validate incoming packet sources in read mode.
-- The PLC must use the configured source UDP port in read mode.
-- STRING uses a null-terminated representation.
-- Numeric ESPHome sensors use float values. Large integer values can therefore lose precision when published.
-- ESPHome number entities use float values and cannot represent all 32-bit integer values exactly.
-- The sequence counter is transmitted but not used for packet ordering validation.
-- The maximum complete UDP datagram size is 1472 bytes.
-- The component does not currently expose a configurable receive timeout or a dedicated stale-data binary sensor.
-
-## Compatibility
-
-The component is intended for WAGO PLC systems using NetVar over UDP.
-
-The PLC and ESPHome configurations must use matching:
-
-- NetVar list identifiers.
-- Variable ordering.
-- Variable types.
-- Endian settings.
-- BOOL packing settings.
-- Memory alignment settings.
-
-Always test communication against the actual PLC configuration before using the component to control machinery.
+Uwaga: przykład pokazuje sposób rozmieszczenia zmiennych i konfiguracji
+list. Dostępność poszczególnych opcji oraz sposób mapowania encji
+zależą od aktualnej implementacji komponentu.
+Uwagi
+- Każda lista NetVar ma własny identyfikator.
+- Można używać kilku list z tym samym adresem IP i portem UDP.
+- BOOL zajmuje jeden bajt, a nie pojedynczy bit.
+- byte_offset oznacza pozycję w payload.
+- bit_offset nie jest używany.
+- Nie należy przekraczać limitu 1472 bajtów dla całego datagramu UDP.
+- Maksymalny payload wynosi 1452 bajty przy założeniu 20-bajtowego
+  nagłówka NetVar.
+  
+  
