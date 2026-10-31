@@ -1,4 +1,3 @@
-
 #pragma once
 
 #include "esphome/core/component.h"
@@ -7,10 +6,10 @@
 
 #include <WiFiUdp.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #ifdef USE_SENSOR
@@ -103,7 +102,7 @@ struct VarDef {
   size_t alignment{1};
 
   size_t byte_offset{0};
-  uint8_t bit_offset{0};
+  bool has_manual_offset{false};
 
 #ifdef USE_SENSOR
   sensor::Sensor *sensor_ptr{nullptr};
@@ -153,10 +152,6 @@ class WagoNetVarComponent : public PollingComponent {
     big_endian_ = big_endian;
   }
 
-  void set_pack_bools(bool pack) {
-    pack_bools_ = pack;
-  }
-
   void set_alignment(bool align) {
     alignment_ = align;
   }
@@ -170,7 +165,8 @@ class WagoNetVarComponent : public PollingComponent {
   }
 
   void add_variable(const std::string &name,
-                    const std::string &type);
+                    const std::string &type,
+                    int byte_offset);
 
 #ifdef USE_SENSOR
   void register_sensor(const std::string &name,
@@ -205,26 +201,6 @@ class WagoNetVarComponent : public PollingComponent {
 
   std::string get_variable_value(const std::string &name);
 
-  uint32_t get_rx_packets() const {
-    return rx_packets_;
-  }
-
-  uint32_t get_tx_packets() const {
-    return tx_packets_;
-  }
-
-  uint32_t get_rx_errors() const {
-    return rx_errors_;
-  }
-
-  uint32_t get_tx_errors() const {
-    return tx_errors_;
-  }
-
-  uint32_t get_rejected_packets() const {
-    return rejected_packets_;
-  }
-
   void setup() override;
   void loop() override;
   void update() override;
@@ -235,7 +211,6 @@ class WagoNetVarComponent : public PollingComponent {
 
  protected:
   std::string ip_address_;
-  IPAddress target_ip_;
 
   uint16_t port_{1202};
   uint16_t list_id_{1};
@@ -245,7 +220,6 @@ class WagoNetVarComponent : public PollingComponent {
   bool enable_write_{true};
 
   bool big_endian_{false};
-  bool pack_bools_{false};
   bool alignment_{false};
 
   bool send_on_change_{false};
@@ -267,12 +241,13 @@ class WagoNetVarComponent : public PollingComponent {
   WiFiUDP udp_;
 
   std::vector<VarDef> variables_;
-  std::unordered_map<std::string, size_t> variable_indices_;
 
   size_t payload_size_{0};
 
   std::vector<uint8_t> tx_buffer_;
-  uint8_t rx_packet_buffer_[NETVAR_MAX_PACKET_SIZE]{};
+
+  std::array<uint8_t, NETVAR_MAX_PACKET_SIZE>
+      rx_packet_buffer_{};
 
   VarDef *get_var(const std::string &name);
 
