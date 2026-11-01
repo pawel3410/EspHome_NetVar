@@ -4,12 +4,10 @@
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
 
-// TODO: abstract UDP backend to support ESP-IDF in addition to Arduino
-#include <WiFiUdp.h>
-
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -43,7 +41,77 @@ static constexpr size_t NETVAR_MAX_PAYLOAD_SIZE =
 
 class WagoNetVarComponent;
 
-#ifdef USE_SWITCH
+// Abstrakcja transportu UDP umożliwiająca obsługę zarówno Arduino, jak i ESP-IDF.
+class UdpTransport {
+ public:
+  virtual ~UdpTransport() = default;
+
+  virtual int begin(uint16_t port) = 0;
+  virtual int parsePacket() = 0;
+  virtual int read(uint8_t *data, size_t len) = 0;
+  virtual int available() = 0;
+  virtual IPAddress remoteIP() = 0;
+  virtual uint16_t remotePort() = 0;
+  virtual bool beginPacket(const IPAddress &ip, uint16_t port) = 0;
+  virtual size_t write(const uint8_t *data, size_t len) = 0;
+  virtual int endPacket() = 0;
+};
+
+#ifdef ARDUINO
+#include <WiFiUdp.h>
+
+class ArduinoUdpTransport : public UdpTransport {
+ public:
+  int begin(uint16_t port) override { return udp_.begin(port) ? 1 : 0; }
+  int parsePacket() override { return udp_.parsePacket(); }
+  int read(uint8_t *data, size_t len) override { return udp_.read(data, len); }
+  int available() override { return udp_.available(); }
+  IPAddress remoteIP() override { return udp_.remoteIP(); }
+  uint16_t remotePort() override { return udp_.remotePort(); }
+  bool beginPacket(const IPAddress &ip, uint16_t port) override {
+    return udp_.beginPacket(ip, port);
+  }
+  size_t write(const uint8_t *data, size_t len) override {
+    return udp_.write(data, len);
+  }
+  int endPacket() override { return udp_.endPacket(); }
+
+ private:
+  WiFiUDP udp_;
+};
+#endif
+
+#ifdef USE_ESP_IDF
+class EspIdfUdpTransport : public UdpTransport {
+ public:
+  int begin(uint16_t port) override {
+    (void)port;
+    ESP_LOGE("wago_netvar", "ESP-IDF UDP transport not implemented yet");
+    return 0;
+  }
+  int parsePacket() override { return 0; }
+  int read(uint8_t *data, size_t len) override {
+    (void)data;
+    (void)len;
+    return 0;
+  }
+  int available() override { return 0; }
+  IPAddress remoteIP() override { return IPAddress(); }
+  uint16_t remotePort() override { return 0; }
+  bool beginPacket(const IPAddress &ip, uint16_t port) override {
+    (void)ip;
+    (void)port;
+    return false;
+  }
+  size_t write(const uint8_t *data, size_t len) override {
+    (void)data;
+    (void)len;
+    return 0;
+  }
+  int endPacket() override { return 0; }
+};
+#endif
+
 class WagoSwitch : public switch_::Switch {
  public:
   void set_parent(WagoNetVarComponent *parent,
@@ -58,7 +126,6 @@ class WagoSwitch : public switch_::Switch {
   WagoNetVarComponent *parent_{nullptr};
   std::string var_name_;
 };
-#endif
 
 #ifdef USE_NUMBER
 class WagoNumber : public number::Number {
@@ -161,6 +228,10 @@ class WagoNetVarComponent : public PollingComponent {
     min_interval_ms_ = ms;
   }
 
+  void set_update_interval(uint32_t ms) {
+    update_interval_ms_ = ms;
+  }
+
   void add_variable(const std::string &name,
                     const std::string &type,
                     int byte_offset);
@@ -236,6 +307,7 @@ class WagoNetVarComponent : public PollingComponent {
   bool send_on_change_{false};
 
   uint32_t min_interval_ms_{500};
+  uint32_t update_interval_ms_{5000};
   uint32_t last_sent_time_{0};
 
   bool is_dirty_{false};
@@ -249,7 +321,7 @@ class WagoNetVarComponent : public PollingComponent {
   uint32_t tx_errors_{0};
   uint32_t rejected_packets_{0};
 
-  WiFiUDP udp_;
+  std::unique_ptr<UdpTransport> udp_;
 
   std::vector<VarDef> variables_;
   size_t payload_size_{0};
