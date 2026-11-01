@@ -610,13 +610,40 @@ void WagoNetVarComponent::set_variable_value(const std::string &name, const std:
     return;
   }
 
-  char *end = nullptr;
-  const double numeric_value = std::strtod(value.c_str(), &end);
-  if (end == value.c_str() || !std::isfinite(numeric_value)) {
-    ESP_LOGE(TAG, "Nie można przekonwertować wartości '%s' na liczbę dla zmiennej %s", value.c_str(), name.c_str());
+  if (var->type == VariableType::REAL) {
+    char *end = nullptr;
+    const double numeric_value = std::strtod(value.c_str(), &end);
+    if (end == value.c_str() || !std::isfinite(numeric_value)) {
+      ESP_LOGE(TAG, "Nie można przekonwertować wartości '%s' na liczbę dla zmiennej %s", value.c_str(), name.c_str());
+      return;
+    }
+    set_variable_value(name, static_cast<float>(numeric_value));
     return;
   }
-  set_variable_value(name, static_cast<float>(numeric_value));
+
+  // Dla typów całkowitych parsuj bez pośrednictwa float, aby uniknąć utraty
+  // precyzji i obsłużyć wartości unsigned większe niż INT_MAX.
+  const bool is_signed = (var->type == VariableType::SINT ||
+                          var->type == VariableType::INT ||
+                          var->type == VariableType::DINT);
+
+  if (is_signed) {
+    char *end = nullptr;
+    const long long numeric_value = std::strtoll(value.c_str(), &end, 10);
+    if (end == value.c_str()) {
+      ESP_LOGE(TAG, "Nie można przekonwertować wartości '%s' na liczbę dla zmiennej %s", value.c_str(), name.c_str());
+      return;
+    }
+    write_integer_(*var, static_cast<uint64_t>(numeric_value));
+  } else {
+    char *end = nullptr;
+    const unsigned long long numeric_value = std::strtoull(value.c_str(), &end, 10);
+    if (end == value.c_str()) {
+      ESP_LOGE(TAG, "Nie można przekonwertować wartości '%s' na liczbę dla zmiennej %s", value.c_str(), name.c_str());
+      return;
+    }
+    write_integer_(*var, static_cast<uint64_t>(numeric_value));
+  }
 }
 
 std::string WagoNetVarComponent::get_variable_value(const std::string &name) const {
