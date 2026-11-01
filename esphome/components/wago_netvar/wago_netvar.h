@@ -112,6 +112,7 @@ class EspIdfUdpTransport : public UdpTransport {
 };
 #endif
 
+#ifdef USE_SWITCH
 class WagoSwitch : public switch_::Switch {
  public:
   void set_parent(WagoNetVarComponent *parent,
@@ -126,6 +127,7 @@ class WagoSwitch : public switch_::Switch {
   WagoNetVarComponent *parent_{nullptr};
   std::string var_name_;
 };
+#endif
 
 #ifdef USE_NUMBER
 class WagoNumber : public number::Number {
