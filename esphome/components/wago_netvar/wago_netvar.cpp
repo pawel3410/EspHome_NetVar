@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <memory>
 
 namespace esphome {
 namespace wago_netvar {
@@ -395,9 +396,25 @@ void WagoNetVarComponent::setup() {
   }
   var_count_ = actual_var_count;
 
+  // Walidacja adresu IP nadawcy/odbiorcy
+  IPAddress check_ip;
+  if (!check_ip.fromString(ip_address_.c_str())) {
+    ESP_LOGE(TAG, "Invalid IP address: %s", ip_address_.c_str());
+    mark_failed();
+    return;
+  }
+
+#ifdef ARDUINO
+  udp_ = std::make_unique<ArduinoUdpTransport>();
+#elif defined(USE_ESP_IDF)
+  udp_ = std::make_unique<EspIdfUdpTransport>();
+#else
+  udp_ = std::make_unique<ArduinoUdpTransport>();
+#endif
+
   tx_buffer_.assign(payload_size_, 0);
 
-  if (udp_.begin(port_) == 0) {
+  if (udp_->begin(port_) == 0) {
     ESP_LOGE(TAG, "Unable to initialize UDP on port %u", port_);
     mark_failed();
     return;
@@ -538,6 +555,13 @@ void WagoNetVarComponent::set_variable_value(const std::string &name, const std:
   }
 
   if (var->type == VariableType::STRING) {
+    for (char c : value) {
+      if (static_cast<unsigned char>(c) > 127) {
+        ESP_LOGE(TAG, "String value for %s contains non-ASCII character", name.c_str());
+        return;
+      }
+    }
+
     if (var->byte_offset + var->size > tx_buffer_.size())
       return;
 
@@ -619,21 +643,21 @@ void WagoNetVarComponent::loop() {
 
   if (enable_read_) {
     for (size_t count = 0; count < MAX_PACKETS_PER_LOOP; ++count) {
-      const int packet_size = udp_.parsePacket();
+      const int packet_size = udp_->parsePacket();
       if (packet_size <= 0)
         break;
 
-      const IPAddress remote_ip = udp_.remoteIP();
-      const uint16_t remote_port = udp_.remotePort();
+      const IPAddress remote_ip = udp_->remoteIP();
+      const uint16_t remote_port = udp_->remotePort();
 
       if (static_cast<size_t>(packet_size) > NETVAR_MAX_PACKET_SIZE) {
         ++rejected_packets_;
-        while (udp_.available())
-          udp_.read();
+        while (udp_->available())
+          udp_->read();
         continue;
       }
 
-      const int bytes_read = udp_.read(rx_packet_buffer_.data(), packet_size);
+      const int bytes_read = udp_->read(rx_packet_buffer_.data(), packet_size);
       if (bytes_read != packet_size) {
         ++rx_errors_;
         continue;
@@ -798,7 +822,7 @@ void WagoNetVarComponent::publish_statistics_() {
 }
 
 void WagoNetVarComponent::update() {
-  if (enable_write_ && !send_on_change_)
+  if (enable_write_ && !send_on_change_ && update_interval_ms_ > 0)
     send_packet_();
   publish_statistics_();
 }
@@ -827,15 +851,15 @@ void WagoNetVarComponent::send_packet_() {
   write_u16_(&header[14], static_cast<uint16_t>(total_length));
   write_u16_(&header[16], sequence_counter_);
 
-  if (!udp_.beginPacket(target_ip, port_)) {
+  if (!udp_->beginPacket(target_ip, port_)) {
     ++tx_errors_;
     return;
   }
 
-  udp_.write(header, NETVAR_HEADER_SIZE);
-  udp_.write(tx_buffer_.data(), payload_size_);
+  udp_->write(header, NETVAR_HEADER_SIZE);
+  udp_->write(tx_buffer_.data(), payload_size_);
   
-  if (udp_.endPacket() != 1) {
+  if (udp_->endPacket() != 1) {
     ++tx_errors_;
     return;
   }
