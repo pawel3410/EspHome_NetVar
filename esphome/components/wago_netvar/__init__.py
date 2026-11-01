@@ -15,6 +15,7 @@ from esphome.const import (
     CONF_ID,
     CONF_IP_ADDRESS,
     CONF_PORT,
+    CONF_UPDATE_INTERVAL,
 )
 
 DEPENDENCIES = ["wifi"]
@@ -206,12 +207,6 @@ def get_type_alignment(type_name):
 
 
 def get_cpp_type(type_name):
-    if type_name in {
-        "DATE",
-        "TIME_OF_DAY",
-        "DATE_AND_TIME",
-    }:
-        return "UDINT"
     return type_name
 
 
@@ -469,6 +464,7 @@ async def to_code(config):
     cg.add(var.set_alignment(config[CONF_ALIGNMENT]))
     cg.add(var.set_send_on_change(config[CONF_SEND_ON_CHANGE]))
     cg.add(var.set_min_interval(config[CONF_MIN_INTERVAL]))
+    cg.add(var.set_update_interval(config.get(CONF_UPDATE_INTERVAL, 5000)))
 
     for variable in config[CONF_VARIABLES]:
         byte_offset = variable.get(CONF_BYTE_OFFSET, -1)
