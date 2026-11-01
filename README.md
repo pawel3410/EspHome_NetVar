@@ -1,150 +1,145 @@
-# ESPHome Wago NetVar Component
 
-Komponent niestandardowy dla **ESPHome** umożliwiający szybką, dwukierunkową komunikację ze sterownikami PLC firmy **Wago** oraz środowiskiem **CoDeSys** przy użyciu protokołu zmiennych sieciowych (**NetVar over UDP**).
+│ WagoNetVar – komponent ESPHome dla protokołu NetVar (WAGO)                                                                                                                                │
 
-Komponent wykorzystuje płaskie buforowanie pamięci oraz blokowy zrzut pakietów, co zapewnia maksymalną wydajność i minimalizuje narzut na procesor ESP32/ESP8266.
 
----
+Komponent umożliwia wymianę danych między ESPHome a sterownikami WAGO (lub innymi urządzeniami) przy użyciu protokołu NetVar przez UDP. Dane przesyłane są w formacie little endian.
 
-## ⚙️ Parametry Konfiguracyjne
 
-| Parametr | Typ | Domyślnie | Opis |
-| --- | --- | --- | --- |
-| **`id`** | GenerationID | Wymagane | Wewnętrzny identyfikator komponentu ESPHome. |
-| **`ip_address`** | String | Wymagane | Adres IP docelowego sterownika Wago PLC. |
-| **`port`** | Port | `1202` | Port UDP używany do transmisji NetVar. |
-| **`list_ID`** | Integer | `1` | Identyfikator listy zmiennych sieciowych (`list_ID` / NetVar ID w CoDeSys). |
-| **`var_count`** | Integer | `0` | Liczba zmiennych w ramce (0 = brak weryfikacji liczby). |
-| **`direction`** | String | `"write"` | Kierunek komunikacji: `"read"`, `"write"` lub `"both"`. |
-| **`endian`** | String | `"little"` | Kolejność bajtów: `"little"` (domyślnie dla CoDeSys) lub `"big"`. |
-| **`pack_bools`** | Boolean | `false` | Czy pakować zmienne typu `BOOL` bitowo w bajtach. |
-| **`alignment`** | Boolean | `false` | Wyrównanie pamięci (alignment) do rozmiaru typów. |
-| **`update_interval`** | Time | `"10s"` | Cykliczny interwał wysyłania pełnej ramki (heartbeat / stały czas). |
-| **`send_on_change`** | Boolean | `false` | Czy wysyłać ramkę natychmiast po zmianie wartości zmiennej. |
-| **`min_interval`** | Time | `"100ms"` | Minimalny czas odstępu między ramkami przy włączonym `send_on_change`. |
-| **`variables`** | List | Opcjonalne | Lista definicji zmiennych (nazwa i typ IEC 61131-3). |
-| **`sensors`** | List | Opcjonalne | Mappowanie zmiennych numerycznych na czujniki ESPHome (`sensor`). |
-| **`binary_sensors`** | List | Opcjonalne | Mappowanie zmiennych binarnych na czujniki binarne (`binary_sensor`). |
-| **`switches`** | List | Opcjonalne | Mappowanie zmiennych na przełączniki (`switch`). |
-| **`numbers`** | List | Opcjonalne | Mappowanie zmiennych na slidery/wprowadzanie liczbowe (`number`). |
+Wymagania
 
----
+ • ESPHome
+ • Moduł z Wi-Fi (ESP32 / ESP8266)
+ • Komponent działa w trybie read lub write na poziomie pojedynczej instancji. Można zdefiniować wiele instancji (np. jedną do odczytu, drugą do zapisu).
 
-## 📦 Struktura Ramki NetVar (UDP Packet Layout)
 
-Każda ramka UDP wysyłana lub odbierana przez komponent składa się z **20-bajtowego nagłówka** oraz następującego po nim bloku danych (**payload**):
+Struktura ramki NetVar
 
-| Offset (bajty) | Rozmiar | Pole | Opis / Wartość |
-| --- | --- | --- | --- |
-| `0 - 3` | 4 bajty | Magic Bytes | Stała nagłówka protokołu: `0x00, 0x2D, 0x53, 0x33` |
-| `4 - 7` | 4 bajty | Reserved | Zarezerwowane / wypełnione zerami |
-| `8 - 9` | 2 bajty | `list_ID` | Identyfikator listy zmiennych sieciowych |
-| `10 - 11` | 2 bajty | Reserved | Zarezerwowane / wypełnione zerami |
-| `12 - 13` | 2 bajty | `var_count` | Liczba zmiennych w pakiecie |
-| `14 - 15` | 2 bajty | Total Length | Całkowity rozmiar ramki w bajtach (`20 + payload_size_`) |
-| `16 - 17` | 2 bajty | Sequence Counter | Licznik sekwencji pakietów (automatycznie inkrementowany) |
-| `18 - 19` | 2 bajty | Reserved | Zarezerwowane / wypełnione zerami |
-| `20+` | Zmienna | Payload | Ciągły blok danych zmiennych (zgodny z ustawieniami `endian` i `alignment`) |
+Nagłówek ma stały rozmiar 20 bajtów i jest przesyłany w kolejności little endian. Po nagłówku następuje ładunek (payload) zawierający zdefiniowane zmienne.
 
----
 
-## 📋 Obsługiwane Typy Zmiennych (IEC 61131-3)
+ Bajty  Pole              Opis
+ ───────────────────────────────────────────────────────────────────────────────────────────
+ 0–3    Magic bytes       Stałe: 0x00 0x2D 0x53 0x33
+ 4–7    Zarezerwowane     Zerowane
+ 8–9    list_ID           Identyfikator listy (uint16 LE)
+ 10–11  Zarezerwowane     Zerowane
+ 12–13  var_count         Liczba zmiennych na liście (uint16 LE)
+ 14–15  frame_size        Całkowita długość ramki w bajtach (nagłówek + payload) (uint16 LE)
+ 16–17  sequence_counter  Licznik sekwencyjny (odczytywany, nie walidowany)
+ 18–19  checksum          Suma kontrolna (odczytywana, nie walidowana)
+ 20–N   Payload           Wartości zmiennych zgodnie z układem pamięci
 
-* **Binarne:** `BOOL`
-* **Całkowite (8-bit):** `BYTE`, `USINT`, `SINT`
-* **Całkowite (16-bit):** `WORD`, `UINT`, `INT`
-* **Całkowite (32-bit/Czas):** `DWORD`, `UDINT`, `DINT`, `TIME`
-* **Zmiennoprzecinkowe:** `REAL` (32-bit), `LREAL` (64-bit)
-* **Tekstowe:** `STRING(n)` (np. `STRING(20)`)
 
----
 
-## 📚 Przykłady Użycia
+Obsługiwane typy danych
 
-### Przykład 1: Podstawowa konfiguracja (Little Endian, domyślne parametry)
+Wszystkie typy są little endian. LREAL nie jest obsługiwany przez NetVar.
 
-```yaml
-esphome:
-  name: wago-gateway
 
-esp32:
-  board: esp32dev
+ Typ    Rozmiar  Zakres / opis
+ ──────────────────────────────────────────────
+ BOOL   1 bajt   0 = FAŁSZ, 1 = PRAWDA
+ BYTE   1 bajt   0–255 (maska bitowa)
+ USINT  1 bajt   0–255
+ SINT   1 bajt   -128–127
+ WORD                2 bajty     0–65 535 (maska bitowa)
+ UINT                2 bajty     0–65 535
+ INT                 2 bajty     -32 768–32 767
+ DWORD               4 bajty     0–4 294 967 295 (maska bitowa)
+ UDINT               4 bajty     0–4 294 967 295
+ DINT                4 bajty     -2 147 483 648–2 147 483 647
+ REAL                4 bajty     Liczba zmiennoprzecinkowa IEEE-754
+ TIME                4 bajty     Czas w ms (UDINT)
+ DATE                4 bajty     Data w s od 1970-01-01 (UDINT)
+ TIME_OF_DAY (TOD)   4 bajty     Czas doby w ms (UDINT)
+ DATE_AND_TIME (DT)  4 bajty     Data i czas w s od 1970-01-01 (UDINT)
+ STRING(n)           n + 1 bajt  Tekst ASCII zakończony nullem (0x00), domyślnie 80 znaków, max 255
 
-wifi:
-  ssid: "MojeWiFi"
-  password: "HasloDoWiFi"
 
-logger:
+
+Konfiguracja ESPHome
+
 
 wago_netvar:
-  ip_address: "192.168.1.10"
-  port: 1202
-  list_ID: 1
-  direction: "write"
-  update_interval: 5s
+  id: moje_netvar
+  ip_address: "192.168.1.10"   # Adres IP nadawcy/odbiorcy. Użyj 0.0.0.0, aby akceptować pakiety z dowolnego IP (np. broadcast).
+  port: 1202                    # Port UDP (domyślnie 1202)
+  list_ID: 1                    # Identyfikator listy
+  var_count: 0                  # 0 = automatycznie na podstawie liczby zmiennych
+  direction: write              # "read" lub "write"
+  alignment: false              # Wyrównanie zmiennych do granic typu
+  send_on_change: false         # Wysyłaj tylko przy zmianie wartości
+  min_interval: 100ms           # Minimalny odstęp między wysyłkami
+
   variables:
-    - name: "bLamp1"
+    - name: "zmienna_bool"
       type: "BOOL"
-    - name: "nSetpoint"
+      byte_offset: 0
+
+    - name: "zmienna_int"
       type: "INT"
-  switches:
-    - variable: "bLamp1"
-      name: "Salon Światło"
-  numbers:
-    - variable: "nSetpoint"
-      name: "Temperatura Zadana"
-      min: 15
-      max: 30
-      step: 0.5
+      byte_offset: 1
 
-```
+    - name: "napis"
+      type: "STRING(32)"
+      byte_offset: 4
 
----
-
-### Przykład 2: Zaawansowana konfiguracja (`send_on_change` + Heartbeat)
-
-```yaml
-wago_netvar:
-  ip_address: "192.168.1.50"
-  port: 1202
-  list_ID: 2
-  var_count: 5
-  direction: "both"
-  endian: "little"
-  pack_bools: false
-  alignment: false
-  
-  update_interval: 10s       # Cykliczny heartbeat
-  send_on_change: true       # Wysyłaj natychmiast po zmianie
-  min_interval: 200ms        # Antyflood dla trybu on_change
-  
-  variables:
-    - name: "Status_Pump1"
-      type: "BOOL"
-    - name: "Cmd_Pump1"
-      type: "BOOL"
-    - name: "Actual_Temp"
-      type: "REAL"
-    - name: "Flow_Rate"
-      type: "REAL"
-    - name: "Operating_Hours"
-      type: "DINT"
+  # Przykład dla direction: read
+  sensors:
+    - platform: wago_netvar
+      variable: "zmienna_int"
+      name: "Czujnik INT"
 
   binary_sensors:
-    - variable: "Status_Pump1"
-      name: "Pompa 1 - Status"
+    - platform: wago_netvar
+      variable: "zmienna_bool"
+      name: "Czujnik BOOL"
 
+  text_sensors:
+    - platform: wago_netvar
+      variable: "napis"
+      name: "Czujnik tekstowy"
+
+  # Przykład dla direction: write
   switches:
-    - variable: "Cmd_Pump1"
-      name: "Pompa 1 - Sterowanie"
+    - platform: wago_netvar
+      variable: "zmienna_bool"
+      name: "Przełącznik"
 
-  sensors:
-    - variable: "Actual_Temp"
-      name: "Temperatura Aktualna"
-      unit_of_measurement: "°C"
-      device_class: "temperature"
-    - variable: "Flow_Rate"
-      name: "Przepływ"
-      unit_of_measurement: "m³/h"
+  numbers:
+    - platform: wago_netvar
+      variable: "zmienna_int"
+      name: "Liczba"
 
-```
+
+
+Walidacja pakietów (tryb read)
+
+Przy odbiorze ramki weryfikowane są:
+
+ • Minimalny i maksymalny rozmiar pakietu.
+ • Adres IP nadawcy (jeśli w konfiguracji ustawiono adres inny niż 0.0.0.0).
+ • Magic bytes w nagłówku.
+ • list_ID oraz var_count zgodne z konfiguracją.
+ • Pole frame_size (bajty 14–15) zgodne z rzeczywistym rozmiarem otrzymanego pakietu.
+ • Rozmiar payload zgodny z zadeklarowanym układem zmiennych.
+
+Pola sequence_counter (bajty 16–17) oraz checksum (bajty 18–19) są odczytywane, ale nie wpływają na walidację.
+
+
+Wysyłanie (tryb write)
+
+Ramki są wysyłane na skonfigurowany adres IP i port. Obsługiwany jest broadcast (255.255.255.255). Licznik sequence_counter jest inkrementowany przy każdej wysłanej ramce.
+
+
+Kompatybilność z ESP-IDF
+
+Komponent został zaprojektowany z myślą o uruchomieniu pod ESPHome zarówno w frameworku Arduino, jak i ESP-IDF. Należy jednak pamiętać, że warstwa UDP może wymagać specyficznych zależności
+w zależności od wybranej platformy budowania.
+
+
+Uwagi
+
+ • Lista może być wyłącznie typu read lub write w ramach jednej instancji komponentu.
+ • Przy byte_offset można ręcznie określić położenie zmiennej w payloadzie; w przeciwnym razie układ jest obliczany automatycznie.
+ • Przy send_on_change: true ramka jest wysyłana tylko gdy wartość się zmieniła, z ograniczeniem min_interval.
