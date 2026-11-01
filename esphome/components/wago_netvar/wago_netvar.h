@@ -5,8 +5,10 @@
 #include "esphome/core/hal.h"
 
 #include <array>
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -82,33 +84,140 @@ class ArduinoUdpTransport : public UdpTransport {
 #endif
 
 #ifdef USE_ESP_IDF
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <lwip/sockets.h>
+
 class EspIdfUdpTransport : public UdpTransport {
  public:
+  ~EspIdfUdpTransport() override {
+    if (sockfd_ >= 0) {
+      close(sockfd_);
+    }
+  }
+
   int begin(uint16_t port) override {
-    (void)port;
-    ESP_LOGE("wago_netvar", "ESP-IDF UDP transport not implemented yet");
-    return 0;
+    if (sockfd_ >= 0) {
+      close(sockfd_);
+      sockfd_ = -1;
+    }
+
+    sockfd_ = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd_ < 0) {
+      ESP_LOGE("wago_netvar", "Failed to create UDP socket");
+      return 0;
+    }
+
+    int flags = fcntl(sockfd_, F_GETFL, 0);
+    if (flags >= 0) {
+      fcntl(sockfd_, F_SETFL, flags | O_NONBLOCK);
+    }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(port);
+
+    if (bind(sockfd_, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0) {
+      ESP_LOGE("wago_netvar", "Failed to bind UDP socket to port %u", port);
+      close(sockfd_);
+      sockfd_ = -1;
+      return 0;
+    }
+
+    local_port_ = port;
+    return 1;
   }
-  int parsePacket() override { return 0; }
+
+  int parsePacket() override {
+    if (sockfd_ < 0)
+      return 0;
+
+    struct sockaddr_in sender;
+    socklen_t sender_len = sizeof(sender);
+    memset(&sender, 0, sizeof(sender));
+
+    int len = recvfrom(sockfd_, rx_buffer_, sizeof(rx_buffer_), MSG_PEEK | MSG_DONTWAIT,
+                       reinterpret_cast<struct sockaddr *>(&sender), &sender_len);
+    if (len < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK)
+        return 0;
+      ESP_LOGE("wago_netvar", "UDP recvfrom error");
+      return 0;
+    }
+
+    rx_len_ = len;
+    uint32_t ip = ntohl(sender.sin_addr.s_addr);
+    remote_ip_ = IPAddress((ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
+    remote_port_ = ntohs(sender.sin_port);
+    return len;
+  }
+
   int read(uint8_t *data, size_t len) override {
-    (void)data;
-    (void)len;
-    return 0;
+    if (sockfd_ < 0 || rx_len_ <= 0)
+      return 0;
+
+    size_t to_copy = std::min<size_t>(len, static_cast<size_t>(rx_len_));
+    memcpy(data, rx_buffer_, to_copy);
+    rx_len_ = 0;
+    return static_cast<int>(to_copy);
   }
-  int available() override { return 0; }
-  IPAddress remoteIP() override { return IPAddress(); }
-  uint16_t remotePort() override { return 0; }
+
+  int available() override { return rx_len_; }
+
+  IPAddress remoteIP() override { return remote_ip_; }
+  uint16_t remotePort() override { return remote_port_; }
+
   bool beginPacket(const IPAddress &ip, uint16_t port) override {
-    (void)ip;
-    (void)port;
-    return false;
+    target_ip_ = ip;
+    target_port_ = port;
+    tx_buffer_.clear();
+    return true;
   }
+
   size_t write(const uint8_t *data, size_t len) override {
-    (void)data;
-    (void)len;
-    return 0;
+    tx_buffer_.insert(tx_buffer_.end(), data, data + len);
+    return len;
   }
-  int endPacket() override { return 0; }
+
+  int endPacket() override {
+    if (sockfd_ < 0)
+      return 0;
+
+    struct sockaddr_in target;
+    memset(&target, 0, sizeof(target));
+    target.sin_family = AF_INET;
+    target.sin_port = htons(target_port_);
+
+    uint32_t ip = (static_cast<uint32_t>(target_ip_[0]) << 24) |
+                  (static_cast<uint32_t>(target_ip_[1]) << 16) |
+                  (static_cast<uint32_t>(target_ip_[2]) << 8) |
+                  static_cast<uint32_t>(target_ip_[3]);
+    target.sin_addr.s_addr = htonl(ip);
+
+    int sent = sendto(sockfd_, tx_buffer_.data(), tx_buffer_.size(), 0,
+                      reinterpret_cast<struct sockaddr *>(&target), sizeof(target));
+    tx_buffer_.clear();
+
+    if (sent < 0) {
+      ESP_LOGE("wago_netvar", "UDP sendto error");
+      return 0;
+    }
+    return 1;
+  }
+
+ private:
+  int sockfd_{-1};
+  uint16_t local_port_{0};
+  uint8_t rx_buffer_[NETVAR_MAX_PACKET_SIZE]{};
+  int rx_len_{0};
+  IPAddress remote_ip_;
+  uint16_t remote_port_{0};
+  IPAddress target_ip_;
+  uint16_t target_port_{0};
+  std::vector<uint8_t> tx_buffer_;
 };
 #endif
 
@@ -158,6 +267,9 @@ enum class VariableType : uint8_t {
   UDINT,
   DINT,
   TIME,
+  DATE,
+  TIME_OF_DAY,
+  DATE_AND_TIME,
   REAL,
   STRING
 };
@@ -284,7 +396,7 @@ class WagoNetVarComponent : public PollingComponent {
   void set_variable_value(const std::string &name,
                           const std::string &value);
 
-  std::string get_variable_value(const std::string &name);
+  std::string get_variable_value(const std::string &name) const;
 
   void setup() override;
   void loop() override;
@@ -340,6 +452,7 @@ class WagoNetVarComponent : public PollingComponent {
 #endif
 
   VarDef *get_var(const std::string &name);
+  const VarDef *get_var(const std::string &name) const;
 
   bool get_type_info(const std::string &type,
                      VariableType &variable_type,
