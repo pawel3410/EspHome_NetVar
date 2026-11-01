@@ -85,8 +85,20 @@ bool WagoNetVarComponent::get_type_info(
     variable_type = VariableType::DINT;
     size = 4;
     alignment = 4;
-  } else if (type == "TIME" || type == "DATE" || type == "TIME_OF_DAY" || type == "DATE_AND_TIME") {
-    variable_type = VariableType::UDINT;
+  } else if (type == "TIME") {
+    variable_type = VariableType::TIME;
+    size = 4;
+    alignment = 4;
+  } else if (type == "DATE") {
+    variable_type = VariableType::DATE;
+    size = 4;
+    alignment = 4;
+  } else if (type == "TIME_OF_DAY") {
+    variable_type = VariableType::TIME_OF_DAY;
+    size = 4;
+    alignment = 4;
+  } else if (type == "DATE_AND_TIME") {
+    variable_type = VariableType::DATE_AND_TIME;
     size = 4;
     alignment = 4;
   } else if (type == "REAL") {
@@ -168,6 +180,14 @@ void WagoNetVarComponent::add_variable(
 
 VarDef *WagoNetVarComponent::get_var(const std::string &name) {
   for (auto &var : variables_) {
+    if (var.name == name)
+      return &var;
+  }
+  return nullptr;
+}
+
+const VarDef *WagoNetVarComponent::get_var(const std::string &name) const {
+  for (const auto &var : variables_) {
     if (var.name == name)
       return &var;
   }
@@ -599,8 +619,8 @@ void WagoNetVarComponent::set_variable_value(const std::string &name, const std:
   set_variable_value(name, static_cast<float>(numeric_value));
 }
 
-std::string WagoNetVarComponent::get_variable_value(const std::string &name) {
-  VarDef *var = get_var(name);
+std::string WagoNetVarComponent::get_variable_value(const std::string &name) const {
+  const VarDef *var = get_var(name);
   if (var == nullptr || var->byte_offset + var->size > tx_buffer_.size())
     return "";
 
@@ -682,10 +702,6 @@ void WagoNetVarComponent::loop() {
           static_cast<size_t>(packet_size) - NETVAR_HEADER_SIZE);
     }
   }
-
-  if (enable_write_ && send_on_change_ && is_dirty_) {
-    trigger_send_();
-  }
 }
 
 bool WagoNetVarComponent::validate_packet_(
@@ -742,6 +758,9 @@ bool WagoNetVarComponent::validate_packet_(
 void WagoNetVarComponent::unpack_payload_(const uint8_t *payload, size_t length) {
   if (payload == nullptr || length != payload_size_)
     return;
+
+  // Store received payload so get_variable_value() can read it back in read mode.
+  std::memcpy(tx_buffer_.data(), payload, length);
 
   for (auto &var : variables_) {
     if (var.byte_offset + var.size > length)
@@ -830,7 +849,7 @@ void WagoNetVarComponent::publish_statistics_() {
 }
 
 void WagoNetVarComponent::update() {
-  if (enable_write_ && !send_on_change_ && update_interval_ms_ > 0)
+  if (enable_write_ && update_interval_ms_ > 0)
     send_packet_();
   publish_statistics_();
 }
