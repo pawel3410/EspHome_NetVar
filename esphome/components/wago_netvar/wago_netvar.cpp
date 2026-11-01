@@ -156,7 +156,7 @@ void WagoNetVarComponent::add_variable(
     var.byte_offset = static_cast<size_t>(byte_offset);
   }
 
-  if (variables_.size() >= NETVAR_MAX_PAYLOAD_SIZE) {
+  if (variables_.size() >= 255) {
     ESP_LOGE(TAG, "Too many NetVar variables");
     mark_failed();
     return;
@@ -426,10 +426,10 @@ void WagoNetVarComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  Alignment: %s", alignment_ ? "yes" : "no");
   ESP_LOGCONFIG(TAG, "  Send on change: %s", send_on_change_ ? "yes" : "no");
   ESP_LOGCONFIG(TAG, "  Min interval: %u ms", min_interval_ms_);
-  ESP_LOGCONFIG(TAG, "  Payload size: %u bytes", payload_size_);
+  ESP_LOGCONFIG(TAG, "  Payload size: %u bytes", static_cast<unsigned>(payload_size_));
   for (const auto &var : variables_) {
     ESP_LOGCONFIG(TAG, "  Variable '%s': type=%s offset=%u size=%u",
-                  var.name.c_str(), var.type_name.c_str(), var.byte_offset, var.size);
+                  var.name.c_str(), var.type_name.c_str(), static_cast<unsigned>(var.byte_offset), static_cast<unsigned>(var.size));
   }
 }
 
@@ -668,8 +668,8 @@ bool WagoNetVarComponent::validate_packet_(
   if (packet_size < NETVAR_HEADER_SIZE || packet_size > NETVAR_MAX_PACKET_SIZE)
     return false;
 
-  // Jeżeli w konfiguracji podano konkretny IP (różny od 0.0.0.0), walidujemy nadawcę.
-  // Jeśli podano 0.0.0.0, akceptujemy pakiety z dowolnego IP (np. broadcast / zmienne IP sterownika).
+  // If a specific IP (other than 0.0.0.0) is configured, validate the sender.
+  // If 0.0.0.0 is specified, accept packets from any IP (e.g. broadcast / dynamic controller IP).
   if (ip_address_ != "0.0.0.0") {
     IPAddress configured_ip;
     configured_ip.fromString(ip_address_.c_str());
@@ -690,14 +690,14 @@ bool WagoNetVarComponent::validate_packet_(
   if (packet_list_id != list_id_ || packet_var_count != var_count_)
     return false;
 
-  // sequence_counter (bajt 16-17) jest odczytywany, ale nie uwzględniany przy walidacji.
+  // sequence_counter (bytes 16-17) is read but not used for validation.
   const uint16_t packet_sequence_counter = read_u16_(&header[16]);
-  // checksum (bajt 18-19) jest odczytywana, ale nie uwzględniana przy walidacji.
+  // checksum (bytes 18-19) is read but not used for validation.
   const uint16_t packet_checksum = read_u16_(&header[18]);
   (void)packet_sequence_counter;
   (void)packet_checksum;
 
-  // Walidacja pola frame_size (bajt 14-15): deklarowana długość ramki musi zgadzać się z rozmiarem otrzymanego pakietu.
+  // Validate frame_size field (bytes 14-15): declared frame length must match received packet size.
   if (declared_length != static_cast<uint16_t>(packet_size))
     return false;
 
@@ -798,7 +798,7 @@ void WagoNetVarComponent::publish_statistics_() {
 }
 
 void WagoNetVarComponent::update() {
-  if (enable_write_)
+  if (enable_write_ && !send_on_change_)
     send_packet_();
   publish_statistics_();
 }
