@@ -464,7 +464,7 @@ async def to_code(config):
     cg.add(var.set_alignment(config[CONF_ALIGNMENT]))
     cg.add(var.set_send_on_change(config[CONF_SEND_ON_CHANGE]))
     cg.add(var.set_min_interval(config[CONF_MIN_INTERVAL]))
-    cg.add(var.set_update_interval(config.get(CONF_UPDATE_INTERVAL, 5000)))
+    cg.add(var.set_update_interval(config[CONF_UPDATE_INTERVAL]))
 
     for variable in config[CONF_VARIABLES]:
         byte_offset = variable.get(CONF_BYTE_OFFSET, -1)
