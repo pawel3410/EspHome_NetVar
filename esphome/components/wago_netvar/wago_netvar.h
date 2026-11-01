@@ -133,7 +133,6 @@ class EspIdfUdpTransport : public UdpTransport {
       return 0;
     }
 
-    local_port_ = port;
     return 1;
   }
 
@@ -157,6 +156,7 @@ class EspIdfUdpTransport : public UdpTransport {
     }
 
     rx_len_ = len;
+    rx_offset_ = 0;
     uint32_t ip = ntohl(sender.sin_addr.s_addr);
     remote_ip_ = IPAddress((ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
     remote_port_ = ntohs(sender.sin_port);
@@ -167,13 +167,20 @@ class EspIdfUdpTransport : public UdpTransport {
     if (sockfd_ < 0 || rx_len_ <= 0)
       return 0;
 
-    size_t to_copy = std::min<size_t>(len, static_cast<size_t>(rx_len_));
-    memcpy(data, rx_buffer_, to_copy);
-    rx_len_ = 0;
+    size_t remaining = static_cast<size_t>(rx_len_) - rx_offset_;
+    size_t to_copy = std::min<size_t>(len, remaining);
+    memcpy(data, rx_buffer_ + rx_offset_, to_copy);
+    rx_offset_ += to_copy;
+    if (rx_offset_ >= static_cast<size_t>(rx_len_))
+      rx_len_ = 0;
     return static_cast<int>(to_copy);
   }
 
-  int available() override { return rx_len_; }
+  int available() override {
+    if (rx_len_ <= 0)
+      return 0;
+    return rx_len_ - static_cast<int>(rx_offset_);
+  }
 
   IPAddress remoteIP() override { return remote_ip_; }
   uint16_t remotePort() override { return remote_port_; }
@@ -218,9 +225,9 @@ class EspIdfUdpTransport : public UdpTransport {
 
  private:
   int sockfd_{-1};
-  uint16_t local_port_{0};
   uint8_t rx_buffer_[NETVAR_MAX_PACKET_SIZE]{};
   int rx_len_{0};
+  size_t rx_offset_{0};
   IPAddress remote_ip_;
   uint16_t remote_port_{0};
   IPAddress target_ip_;
