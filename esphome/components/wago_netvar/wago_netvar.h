@@ -4,6 +4,7 @@
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
 
+// TODO: abstract UDP backend to support ESP-IDF in addition to Arduino
 #include <WiFiUdp.h>
 
 #include <array>
