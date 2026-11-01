@@ -6,7 +6,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <limits>
 #include <memory>
 
 namespace esphome {
@@ -910,8 +909,15 @@ void WagoNetVarComponent::send_packet_() {
     return;
   }
 
-  udp_->write(header, NETVAR_HEADER_SIZE);
-  udp_->write(tx_buffer_.data(), payload_size_);
+  if (udp_->write(header, NETVAR_HEADER_SIZE) != NETVAR_HEADER_SIZE) {
+    ++tx_errors_;
+    return;
+  }
+
+  if (udp_->write(tx_buffer_.data(), payload_size_) != payload_size_) {
+    ++tx_errors_;
+    return;
+  }
   
   if (udp_->endPacket() != 1) {
     ++tx_errors_;
