@@ -57,7 +57,8 @@ Zmienne definiuje się bezpośrednio w sekcji `wago_netvar:`. Encje (sensory, pr
 | Opcja | Wymagana | Domyślna | Opis |
 |-------|----------|----------|------|
 | `id` | Tak | – | Unikalny identyfikator komponentu ESPHome. |
-| `ip_address` | Tak | – | Adres IP odbiorcy/nadawcy. W trybie `read` może być `0.0.0.0`, aby akceptować pakiety z dowolnego IP. W trybie `write` nie może być `0.0.0.0` (dozwolony broadcast `255.255.255.255`). |
+| `ip_address` | Tak | – | Adres IP odbiorcy/nadawcy. W trybie `read` może być `0.0.0.0`, aby akceptować pakiety z dowolnego IP. W trybie `write` nie może być `0.0.0.0` (dozwolony broadcast `255.255.255.255`).
+|
 | `port` | Nie | `1202` | Port UDP. Różne instancje mogą używać różnych portów. |
 | `list_id` | Nie | `1` | Identyfikator listy NetVar (bajty 8–9 ramki). |
 | `var_count` | Nie | `0` | Liczba zmiennych na liście. Jeśli `0`, zostanie ustawiona automatycznie na podstawie zdefiniowanych zmiennych. |
@@ -90,3 +91,120 @@ Każda zmienna w sekcji `variables` wymaga:
 
 #### Przykład 1: Odczyt (read) z ręcznymi offsetami
 
+```yaml
+wago_netvar:
+  id: wago_read
+  ip_address: "0.0.0.0"        # Akceptuj pakiety z dowolnego IP
+  port: 1202
+  list_id: 10
+  direction: read
+  alignment: false
+  variables:
+    - name: "temp"
+      type: "REAL"
+      byte_offset: 0
+    - name: "status"
+      type: "BOOL"
+      byte_offset: 4
+    - name: "alarm"
+      type: "BOOL"
+      byte_offset: 5
+  sensors:
+    - platform: wago_netvar
+      variable: "temp"
+      name: "Temperatura"
+  binary_sensors:
+    - platform: wago_netvar
+      variable: "status"
+      name: "Status pracy"
+  rejected_packets:
+    name: "Odrzucone ramki"
+  rx_packets:
+    name: "Odebrane ramki"
+
+
+Przykład 2: Zapis (write) z automatycznymi offsetami i wysyłką przy zmianie
+
+
+wago_netvar:
+  id: wago_write
+  ip_address: "192.168.1.50"   # Adres sterownika WAGO
+  port: 1202
+  list_id: 20
+  direction: write
+  send_on_change: true
+  min_interval: "1000ms"
+  update_interval: "5s"
+  alignment: true
+  variables:
+    - name: "setpoint"
+      type: "REAL"
+    - name: "pump_on"
+      type: "BOOL"
+  switches:
+    - platform: wago_netvar
+      variable: "pump_on"
+      name: "Pompa"
+  numbers:
+    - platform: wago_netvar
+      variable: "setpoint"
+      name: "Nastawa temperatury"
+      min_value: 0
+      max_value: 100
+  tx_packets:
+    name: "Wysłane ramki"
+
+
+Przykład 3: Wysyłka broadcast
+
+
+wago_netvar:
+  id: wago_broadcast
+  ip_address: "255.255.255.255"
+  port: 1202
+  list_id: 30
+  direction: write
+  variables:
+    - name: "heartbeat"
+      type: "BOOL"
+
+
+
+Walidacja ramek (tryb read)
+
+Każda przychodząca ramka jest walidowana pod kątem:
+
+ • adresu IP nadawcy (jeśli ip_address różne od 0.0.0.0),
+ • portu docelowego (niejawnie przez bindowanie gniazda UDP),
+ • list_ID (bajty 8–9),
+ • var_count (bajty 12–13) zgodnie z konfiguracją,
+ • frame_size (bajty 14–15) zgodnie z rozmiarem otrzymanego pakietu,
+ • rozmiaru ładunku zgodnie z obliczonym payload_size.
+
+Pola sequence_counter (bajty 16–17) oraz checksum (bajty 18–19) są odczytywane, ale nie walidowane. Przy wysyłce checksum jest zerowane.
+
+
+Automatyczne sensory statystyk
+
+Komponent może automatycznie utworzyć sensory ESPHome z licznikami:
+
+ • rejected_packets – ramki odrzucone przy walidacji,
+ • rx_packets – poprawnie odebrane ramki,
+ • tx_packets – wysłane ramki,
+ • rx_errors – błędy odbioru,
+ • tx_errors – błędy wysyłki.
+
+
+Uwagi dotyczące typów danych i konwersji
+
+ • Wszystkie liczby są przesyłane w formacie little endian.
+ • Przy przepełnieniu typu całkowitego mniej znaczące bity są obcinane.
+ • Przy wysyłce wartości typu STRING liczby są konwertowane na tekst ASCII.
+ • W trybie read offsety zmiennych muszą być podane ręcznie (byte_offset), co pozwala pominąć odczyt niektórych zmiennych poprzez pozostawienie luk w ładunku.
+ • W trybie write offsety mogą być przydzielane automatycznie (jeśli byte_offset nie jest podany).
+
+
+Wsparcie platform
+
+Komponent działa zarówno na Arduino, jak i ESP-IDF. Warstwa transportu UDP jest abstrakcyjna (UdpTransport), co umożliwia łatwe dodanie kolejnych platform w przyszłości. Komponent implementuje dump_config() i
+inicjalizuje się po Wi-Fi (AFTER_WIFI).
