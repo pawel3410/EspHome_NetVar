@@ -57,8 +57,7 @@ Zmienne definiuje się bezpośrednio w sekcji `wago_netvar:`. Encje (sensory, pr
 | Opcja | Wymagana | Domyślna | Opis |
 |-------|----------|----------|------|
 | `id` | Tak | – | Unikalny identyfikator komponentu ESPHome. |
-| `ip_address` | Tak | – | Adres IP odbiorcy/nadawcy. W trybie `read` może być `0.0.0.0`, aby akceptować pakiety z dowolnego IP. W trybie `write` nie może być `0.0.0.0` (dozwolony broadcast `255.255.255.255`).
-|
+| `ip_address` | Tak | – | Adres IP odbiorcy/nadawcy. W trybie `read` może być `0.0.0.0`, aby akceptować pakiety z dowolnego IP. W trybie `write` nie może być `0.0.0.0` (dozwolony broadcast `255.255.255.255`). |
 | `port` | Nie | `1202` | Port UDP. Różne instancje mogą używać różnych portów. |
 | `list_id` | Nie | `1` | Identyfikator listy NetVar (bajty 8–9 ramki). |
 | `var_count` | Nie | `0` | Liczba zmiennych na liście. Jeśli `0`, zostanie ustawiona automatycznie na podstawie zdefiniowanych zmiennych. |
@@ -121,11 +120,11 @@ wago_netvar:
     name: "Odrzucone ramki"
   rx_packets:
     name: "Odebrane ramki"
+```
 
+#### Przykład 2: Zapis (write) z automatycznymi offsetami i wysyłką przy zmianie
 
-Przykład 2: Zapis (write) z automatycznymi offsetami i wysyłką przy zmianie
-
-
+```yaml
 wago_netvar:
   id: wago_write
   ip_address: "192.168.1.50"   # Adres sterownika WAGO
@@ -153,11 +152,11 @@ wago_netvar:
       max_value: 100
   tx_packets:
     name: "Wysłane ramki"
+```
 
+#### Przykład 3: Wysyłka broadcast
 
-Przykład 3: Wysyłka broadcast
-
-
+```yaml
 wago_netvar:
   id: wago_broadcast
   ip_address: "255.255.255.255"
@@ -167,10 +166,9 @@ wago_netvar:
   variables:
     - name: "heartbeat"
       type: "BOOL"
+```
 
-
-
-Walidacja ramek (tryb read)
+## Walidacja ramek (tryb read)
 
 Każda przychodząca ramka jest walidowana pod kątem:
 
@@ -183,8 +181,7 @@ Każda przychodząca ramka jest walidowana pod kątem:
 
 Pola sequence_counter (bajty 16–17) oraz checksum (bajty 18–19) są odczytywane, ale nie walidowane. Przy wysyłce checksum jest zerowane.
 
-
-Automatyczne sensory statystyk
+## Automatyczne sensory statystyk
 
 Komponent może automatycznie utworzyć sensory ESPHome z licznikami:
 
@@ -194,8 +191,7 @@ Komponent może automatycznie utworzyć sensory ESPHome z licznikami:
  • rx_errors – błędy odbioru,
  • tx_errors – błędy wysyłki.
 
-
-Uwagi dotyczące typów danych i konwersji
+## Uwagi dotyczące typów danych i konwersji
 
  • Wszystkie liczby są przesyłane w formacie little endian.
  • Przy przepełnieniu typu całkowitego mniej znaczące bity są obcinane.
@@ -203,8 +199,6 @@ Uwagi dotyczące typów danych i konwersji
  • W trybie read offsety zmiennych muszą być podane ręcznie (byte_offset), co pozwala pominąć odczyt niektórych zmiennych poprzez pozostawienie luk w ładunku.
  • W trybie write offsety mogą być przydzielane automatycznie (jeśli byte_offset nie jest podany).
 
+## Wsparcie platform
 
-Wsparcie platform
-
-Komponent działa zarówno na Arduino, jak i ESP-IDF. Warstwa transportu UDP jest abstrakcyjna (UdpTransport), co umożliwia łatwe dodanie kolejnych platform w przyszłości. Komponent implementuje dump_config() i
-inicjalizuje się po Wi-Fi (AFTER_WIFI).
+Komponent działa zarówno na Arduino, jak i ESP-IDF. Warstwa transportu UDP jest abstrakcyjna (UdpTransport), co umożliwia łatwe dodanie kolejnych platform w przyszłości. Komponent implementuje dump_config() i inicjalizuje się po Wi-Fi (AFTER_WIFI).
