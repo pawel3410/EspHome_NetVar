@@ -404,6 +404,12 @@ void WagoNetVarComponent::setup() {
     return;
   }
 
+  if (enable_write_ && ip_address_ == "0.0.0.0") {
+    ESP_LOGE(TAG, "Adres IP 0.0.0.0 jest niedozwolony w trybie write");
+    mark_failed();
+    return;
+  }
+
 #ifdef ARDUINO
   udp_ = std::make_unique<ArduinoUdpTransport>();
 #elif defined(USE_ESP_IDF)
@@ -586,9 +592,11 @@ void WagoNetVarComponent::set_variable_value(const std::string &name, const std:
 
   char *end = nullptr;
   const double numeric_value = std::strtod(value.c_str(), &end);
-  if (end != value.c_str() && std::isfinite(numeric_value)) {
-    set_variable_value(name, static_cast<float>(numeric_value));
+  if (end == value.c_str() || !std::isfinite(numeric_value)) {
+    ESP_LOGE(TAG, "Nie można przekonwertować wartości '%s' na liczbę dla zmiennej %s", value.c_str(), name.c_str());
+    return;
   }
+  set_variable_value(name, static_cast<float>(numeric_value));
 }
 
 std::string WagoNetVarComponent::get_variable_value(const std::string &name) {
