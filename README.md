@@ -7,6 +7,7 @@ Komponent umożliwia wymianę danych między ESPHome a sterownikami WAGO (lub in
 - ESPHome
 - Moduł z Wi-Fi (ESP32 / ESP8266)
 - Komponent działa w trybie `read` lub `write` na poziomie pojedynczej instancji. Można zdefiniować wiele instancji (np. jedną do odczytu, drugą do zapisu).
+- Wsparcie dla platform Arduino oraz ESP-IDF.
 
 ## Struktura ramki NetVar
 
@@ -50,4 +51,42 @@ Wszystkie typy są little endian. LREAL nie jest obsługiwany przez NetVar.
 ## Konfiguracja ESPHome
 
 Zmienne definiuje się bezpośrednio w sekcji `wago_netvar:`. Encje (sensory, przełączniki, itp.) są mapowane na zmienne przez pole `variable` i muszą być zdefiniowane na poziomie głównym konfiguracji ESPHome.
+
+### Pełna lista opcji konfiguracyjnych
+
+| Opcja | Wymagana | Domyślna | Opis |
+|-------|----------|----------|------|
+| `id` | Tak | – | Unikalny identyfikator komponentu ESPHome. |
+| `ip_address` | Tak | – | Adres IP odbiorcy/nadawcy. W trybie `read` może być `0.0.0.0`, aby akceptować pakiety z dowolnego IP. W trybie `write` nie może być `0.0.0.0` (dozwolony broadcast `255.255.255.255`). |
+| `port` | Nie | `1202` | Port UDP. Różne instancje mogą używać różnych portów. |
+| `list_id` | Nie | `1` | Identyfikator listy NetVar (bajty 8–9 ramki). |
+| `var_count` | Nie | `0` | Liczba zmiennych na liście. Jeśli `0`, zostanie ustawiona automatycznie na podstawie zdefiniowanych zmiennych. |
+| `direction` | Nie | `write` | Kierunek komunikacji: `read` (odbiór) lub `write` (wysyłka). |
+| `alignment` | Nie | `false` | Czy wyrównywać zmienne automatycznie zgodnie z wymaganiami typu (np. 2 bajty dla WORD, 4 bajty dla DWORD). |
+| `send_on_change` | Nie | `false` | Czy wysyłać ramkę natychmiast po zmianie wartości zmiennej. |
+| `min_interval` | Nie | `500ms` | Minimalny odstęp czasu między wysyłkami przy `send_on_change: true`. |
+| `update_interval` | Nie | `5s` | Interwał cyklicznej wysyłki ramki w trybie `write`. Ustawienie `0s` wyłącza wysyłkę cykliczną. Działa równolegle z `send_on_change`. |
+| `variables` | Tak | – | Lista zdefiniowanych zmiennych NetVar. |
+| `sensors` | Nie | – | Mapowanie zmiennych numerycznych na sensory ESPHome. |
+| `binary_sensors` | Nie | – | Mapowanie zmiennych BOOL na binary_sensor. |
+| `text_sensors` | Nie | – | Mapowanie zmiennych STRING na text_sensor. |
+| `switches` | Nie | – | Mapowanie zmiennych BOOL na switch (tylko tryb `write`). |
+| `numbers` | Nie | – | Mapowanie zmiennych numerycznych na number (tylko tryb `write`). |
+| `rejected_packets` | Nie | – | Sensor liczby odrzuconych ramek (błędna walidacja). |
+| `rx_packets` | Nie | – | Sensor liczby poprawnie odebranych ramek. |
+| `tx_packets` | Nie | – | Sensor liczby wysłanych ramek. |
+| `rx_errors` | Nie | – | Sensor liczby błędów odbioru. |
+| `tx_errors` | Nie | – | Sensor liczby błędów wysyłki. |
+
+### Definicja zmiennych
+
+Każda zmienna w sekcji `variables` wymaga:
+
+- `name` – nazwa zmiennej (unikalna w obrębie listy).
+- `type` – typ NetVar (np. `BOOL`, `UINT`, `REAL`, `STRING(20)`).
+- `byte_offset` (opcjonalnie) – ręczny offset w bajcie w ładunku. W trybie `read` jest wymagany dla każdej zmiennej. W trybie `write` może być pominięty, wtedy offset jest przydzielany automatycznie.
+
+### Przykłady konfiguracji
+
+#### Przykład 1: Odczyt (read) z ręcznymi offsetami
 
