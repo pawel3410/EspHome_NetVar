@@ -331,13 +331,13 @@ def validate_config(config):
     config[CONF_VARIABLES] = normalized_variables
     calculate_layout(config, normalized_variables)
 
-    # W trybie read offset musi być podany ręcznie dla każdej zmiennej
-    # (można wtedy pominąć odczyt niektórych zmiennych przez pozostawienie luk).
+    # In 'read' direction, byte_offset must be specified manually for each variable
+    # (some variables can be skipped by leaving gaps).
     if direction == "read":
         for variable in normalized_variables:
             if CONF_BYTE_OFFSET not in variable:
                 raise cv.Invalid(
-                    f"direction 'read' wymaga ręcznego podania byte_offset dla zmiennej '{variable[CONF_VAR_NAME]}'"
+                    f"direction 'read' requires manual byte_offset for variable '{variable[CONF_VAR_NAME]}'"
                 )
 
     variable_map = {
@@ -348,8 +348,8 @@ def validate_config(config):
     mappings = (
         (CONF_SENSORS, FLOAT_TYPES | INTEGER_TYPES),
         (CONF_BINARY_SENSORS, {"BOOL"}),
-        # TEXT_SENSORS wymagają typu STRING, więc zbiór dozwolonych typów jest pusty.
-        # Walidacja odbywa się w specjalnej gałęzi if poniżej.
+        # Text sensors require STRING type, so the set of allowed types is empty.
+        # Validation is performed in the special if branch below.
         (CONF_TEXT_SENSORS, set()),
         (CONF_SWITCHES, {"BOOL"}),
         (CONF_NUMBERS, FLOAT_TYPES | INTEGER_TYPES),
