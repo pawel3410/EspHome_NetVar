@@ -17,18 +17,17 @@ Struktura ramki NetVar
 Nagłówek ma stały rozmiar 20 bajtów i jest przesyłany w kolejności little endian. Po nagłówku następuje ładunek (payload) zawierający zdefiniowane zmienne.
 
 
- Bajty  Pole              Opis
- ───────────────────────────────────────────────────────────────────────────────────────────
- 0–3    Magic bytes       Stałe: 0x00 0x2D 0x53 0x33
- 4–7    Zarezerwowane     Zerowane
- 8–9    list_ID           Identyfikator listy (uint16 LE)
- 10–11  Zarezerwowane     Zerowane
- 12–13  var_count         Liczba zmiennych na liście (uint16 LE)
- 14–15  frame_size        Całkowita długość ramki w bajtach (nagłówek + payload) (uint16 LE)
- 16–17  sequence_counter  Licznik sekwencyjny (odczytywany, nie walidowany)
- 18–19  checksum          Suma kontrolna (odczytywana, nie walidowana)
- 20–N   Payload           Wartości zmiennych zgodnie z układem pamięci
-
+| Bajty | Pole              | Opis                                                                                                                               |
+|-------|-------------------|------------------------------------------------------------------------------------------------------------------------------------|
+| 0–3   | Magic bytes       | Stałe: 0x00 0x2D 0x53 0x33                                                                                                         |
+| 4–7   | Zarezerwowane     | Zerowane                                                                                                                           |
+| 8–9   | list_ID           | Identyfikator listy (uint16 LE)                                                                                                    |
+| 10–11 | Zarezerwowane     | Zerowane                                                                                                                           |
+| 12–13 | var_count         | Liczba zmiennych na liście (uint16 LE)                                                                                             |
+| 14–15 | frame_size        | Całkowita długość ramki w bajtach (nagłówek + payload) (uint16 LE)                                                                 |
+| 16–17 | sequence_counter  | Licznik sekwencyjny (odczytywany, nie walidowany)                                                                                  |
+| 18–19 | checksum          | Suma kontrolna (odczytywana, nie walidowana)                                                                                       |
+| 20–N  | Payload           | Wartości zmiennych zgodnie z układem pamięci                                                                                       |
 
 
 Obsługiwane typy danych
@@ -36,28 +35,29 @@ Obsługiwane typy danych
 Wszystkie typy są little endian. LREAL nie jest obsługiwany przez NetVar.
 
 
- Typ    Rozmiar  Zakres / opis
- ──────────────────────────────────────────────
- BOOL   1 bajt   0 = FAŁSZ, 1 = PRAWDA
- BYTE   1 bajt   0–255 (maska bitowa)
- USINT  1 bajt   0–255
- SINT   1 bajt   -128–127
- WORD                2 bajty     0–65 535 (maska bitowa)
- UINT                2 bajty     0–65 535
- INT                 2 bajty     -32 768–32 767
- DWORD               4 bajty     0–4 294 967 295 (maska bitowa)
- UDINT               4 bajty     0–4 294 967 295
- DINT                4 bajty     -2 147 483 648–2 147 483 647
- REAL                4 bajty     Liczba zmiennoprzecinkowa IEEE-754
- TIME                4 bajty     Czas w ms (UDINT)
- DATE                4 bajty     Data w s od 1970-01-01 (UDINT)
- TIME_OF_DAY (TOD)   4 bajty     Czas doby w ms (UDINT)
- DATE_AND_TIME (DT)  4 bajty     Data i czas w s od 1970-01-01 (UDINT)
- STRING(n)           n + 1 bajt  Tekst ASCII zakończony nullem (0x00), domyślnie 80 znaków, max 255
-
+| Typ    | Rozmiar  | Zakres / opis                                                                 |
+|--------|----------|-------------------------------------------------------------------------------|
+| BOOL   | 1 bajt   | 0 = FAŁSZ, 1 = PRAWDA                                                        |
+| BYTE   | 1 bajt   | 0–255 (maska bitowa)                                                         |
+| USINT  | 1 bajt   | 0–255                                                                        |
+| SINT   | 1 bajt   | -128–127                                                                     |
+| WORD   | 2 bajty  | 0–65 535 (maska bitowa)                                                      |
+| UINT   | 2 bajty  | 0–65 535                                                                     |
+| INT    | 2 bajty  | -32 768–32 767                                                               |
+| DWORD  | 4 bajty  | 0–4 294 967 295 (maska bitowa)                                               |
+| UDINT  | 4 bajty  | 0–4 294 967 295                                                              |
+| DINT   | 4 bajty  | -2 147 483 648–2 147 483 647                                                 |
+| REAL   | 4 bajty  | Liczba zmiennoprzecinkowa IEEE-754                                           |
+| TIME   | 4 bajty  | Czas w ms (UDINT)                                                            |
+| DATE   | 4 bajty  | Data w s od 1970-01-01 (UDINT)                                               |
+| TIME_OF_DAY (TOD) | 4 bajty | Czas doby w ms (UDINT)                                      |
+| DATE_AND_TIME (DT) | 4 bajty | Data i czas w s od 1970-01-01 (UDINT)                    |
+| STRING(n) | n + 1 bajt | Tekst ASCII zakończony nullem (0x00), domyślnie 80 znaków, max 255     |
 
 
 Konfiguracja ESPHome
+
+Zmienne definiuje się bezpośrednio w sekcji `wago_netvar:`. Encje (sensory, przełączniki, itp.) są mapowane na zmienne przez pole `variable`.
 
 
 wago_netvar:
@@ -142,4 +142,6 @@ Uwagi
 
  • Lista może być wyłącznie typu read lub write w ramach jednej instancji komponentu.
  • Przy byte_offset można ręcznie określić położenie zmiennej w payloadzie; w przeciwnym razie układ jest obliczany automatycznie.
- • Przy send_on_change: true ramka jest wysyłana tylko gdy wartość się zmieniła, z ograniczeniem min_interval.
+ • Przy send_on_change: true ramka jest wysyłana tylko gdy wartość się zmieniła, z ograniczeniem min_interval.```
+
+Uwaga: powyższe pliki zawierają pełną zawartość z poprawkami. Żadne nowe pliki nie zostały utworzone.
