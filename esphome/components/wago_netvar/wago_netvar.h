@@ -85,7 +85,9 @@ class ArduinoUdpTransport : public UdpTransport {
 
 #ifdef USE_ESP_IDF
 #include <arpa/inet.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #include <lwip/sockets.h>
 
@@ -114,6 +116,10 @@ class EspIdfUdpTransport : public UdpTransport {
       fcntl(sockfd_, F_SETFL, flags | O_NONBLOCK);
     }
 
+    // Zezwól na wysyłkę broadcast (np. 255.255.255.255) zgodnie z założeniami.
+    int broadcast = 1;
+    setsockopt(sockfd_, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
+
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -139,7 +145,9 @@ class EspIdfUdpTransport : public UdpTransport {
     socklen_t sender_len = sizeof(sender);
     memset(&sender, 0, sizeof(sender));
 
-    int len = recvfrom(sockfd_, rx_buffer_, sizeof(rx_buffer_), MSG_PEEK | MSG_DONTWAIT,
+    // Odbierz pakiet i usuń go z kolejki gniazda (bez MSG_PEEK), aby ten sam pakiet
+    // nie był przetwarzany wielokrotnie w pętli loop().
+    int len = recvfrom(sockfd_, rx_buffer_, sizeof(rx_buffer_), MSG_DONTWAIT,
                        reinterpret_cast<struct sockaddr *>(&sender), &sender_len);
     if (len < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK)
