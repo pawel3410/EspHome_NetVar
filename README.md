@@ -22,7 +22,8 @@ Nagłówek ma stały rozmiar 20 bajtów i jest przesyłany w kolejności little 
 | 12–13 | var_count         | Liczba zmiennych na liście (uint16 LE)                                                                                             |
 | 14–15 | frame_size        | Całkowita długość ramki w bajtach (nagłówek + payload) (uint16 LE)                                                                 |
 | 16–17 | sequence_counter  | Licznik sekwencyjny (odczytywany, nie walidowany)                                                                                  |
-| 18–19 | checksum          | Suma kontrolna (odczytywana, nie walidowana; przy wysyłce = 0)                                                                     |
+| 18 | 1 bajt | Flagi: `00` bez sumy kontrolnej, `02` z sumą kontrolną |
+| 19 | 1 bajt | Suma kontrolna (`00`, gdy wyłączona) |                                                                    |
 | 20–N  | Payload           | Wartości zmiennych zgodnie z układem pamięci                                                                                       |
 
 ## Obsługiwane typy danych
