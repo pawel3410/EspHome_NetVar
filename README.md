@@ -15,15 +15,15 @@ Nagłówek ma stały rozmiar 20 bajtów i jest przesyłany w kolejności little 
 
 | Bajty | Pole              | Opis                                                                                                                               |
 |-------|-------------------|------------------------------------------------------------------------------------------------------------------------------------|
-| 0–3   | Magic bytes       | Stałe: 0x00 0x2D 0x53 0x33                                                                                                         |
+| 0–3   | Magic bytes       | Sygnatura: 0x00 0x2D 0x53 0x33                                                                                                         |
 | 4–7   | Zarezerwowane     | Zerowane                                                                                                                           |
 | 8–9   | list_ID           | Identyfikator listy (uint16 LE)                                                                                                    |
-| 10–11 | Zarezerwowane     | Zerowane                                                                                                                           |
+| 10–11 | var_index         | index zmiennej w trybie niepakowanym                                                                                               |
 | 12–13 | var_count         | Liczba zmiennych na liście (uint16 LE)                                                                                             |
 | 14–15 | frame_size        | Całkowita długość ramki w bajtach (nagłówek + payload) (uint16 LE)                                                                 |
 | 16–17 | sequence_counter  | Licznik sekwencyjny (odczytywany, nie walidowany)                                                                                  |
-| 18 | 1 bajt | Flagi: `00` bez sumy kontrolnej, `02` z sumą kontrolną |
-| 19 | 1 bajt | Suma kontrolna (`00`, gdy wyłączona) |                                                                    |
+| 18    | checksum_present  | Flagi: `00` bez sumy kontrolnej, `02` z sumą kontrolną                                                                             |
+| 19    | checksum          | Suma kontrolna (`00`, gdy wyłączona)                                                                                               |
 | 20–N  | Payload           | Wartości zmiennych zgodnie z układem pamięci                                                                                       |
 
 ## Obsługiwane typy danych
