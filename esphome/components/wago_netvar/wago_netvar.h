@@ -1,248 +1,54 @@
 #pragma once
 
 #include "esphome/core/component.h"
-#include "esphome/core/log.h"
 #include "esphome/core/hal.h"
+#include "esphome/core/log.h"
 
-#include <array>
-#include <algorithm>
+#include "esphome/components/binary_sensor/binary_sensor.h"
+#include "esphome/components/number/number.h"
+#include "esphome/components/sensor/sensor.h"
+#include "esphome/components/switch/switch.h"
+#include "esphome/components/text_sensor/text_sensor.h"
+
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
-
-#ifdef USE_SENSOR
-#include "esphome/components/sensor/sensor.h"
-#endif
-
-#ifdef USE_BINARY_SENSOR
-#include "esphome/components/binary_sensor/binary_sensor.h"
-#endif
-
-#ifdef USE_TEXT_SENSOR
-#include "esphome/components/text_sensor/text_sensor.h"
-#endif
-
-#ifdef USE_NUMBER
-#include "esphome/components/number/number.h"
-#endif
-
-#ifdef USE_SWITCH
-#include "esphome/components/switch/switch.h"
-#endif
 
 namespace esphome {
 namespace wago_netvar {
 
 static constexpr size_t NETVAR_HEADER_SIZE = 20;
 static constexpr size_t NETVAR_MAX_PACKET_SIZE = 1472;
-static constexpr size_t NETVAR_MAX_PAYLOAD_SIZE =
-    NETVAR_MAX_PACKET_SIZE - NETVAR_HEADER_SIZE;
+static constexpr size_t NETVAR_MAX_PAYLOAD_SIZE = NETVAR_MAX_PACKET_SIZE - NETVAR_HEADER_SIZE;
 
 class WagoNetVarComponent;
 
-// Abstrakcja transportu UDP umożliwiająca obsługę zarówno Arduino, jak i ESP-IDF.
+/// Platform independent UDP transport (Arduino / ESP-IDF). Implementations live in the .cpp file,
+/// so no platform headers leak into the component header.
+/// IPv4 addresses are passed as host-order integers: a.b.c.d -> (a << 24) | (b << 16) | (c << 8) | d.
 class UdpTransport {
  public:
   virtual ~UdpTransport() = default;
 
-  virtual int begin(uint16_t port) = 0;
-  virtual int parsePacket() = 0;
-  virtual int read(uint8_t *data, size_t len) = 0;
-  virtual int available() = 0;
-  virtual IPAddress remoteIP() = 0;
-  virtual uint16_t remotePort() = 0;
-  virtual bool beginPacket(const IPAddress &ip, uint16_t port) = 0;
-  virtual size_t write(const uint8_t *data, size_t len) = 0;
-  virtual int endPacket() = 0;
+  /// Opens the socket. port == 0 means "send only" (no fixed local port is bound).
+  virtual bool begin(uint16_t port) = 0;
+
+  /// Non-blocking receive of one datagram.
+  /// Returns the datagram length (> capacity means the datagram is too large and `buffer` is invalid),
+  /// 0 when nothing is pending, or a negative value on a socket error.
+  virtual int receive(uint8_t *buffer, size_t capacity, uint32_t &remote_ip, uint16_t &remote_port) = 0;
+
+  /// Sends one datagram. Returns true on success.
+  virtual bool send(uint32_t ip, uint16_t port, const uint8_t *data, size_t length) = 0;
 };
 
-#ifdef ARDUINO
-#include <WiFiUdp.h>
-
-class ArduinoUdpTransport : public UdpTransport {
- public:
-  int begin(uint16_t port) override { return udp_.begin(port) ? 1 : 0; }
-  int parsePacket() override { return udp_.parsePacket(); }
-  int read(uint8_t *data, size_t len) override { return udp_.read(data, len); }
-  int available() override { return udp_.available(); }
-  IPAddress remoteIP() override { return udp_.remoteIP(); }
-  uint16_t remotePort() override { return udp_.remotePort(); }
-  bool beginPacket(const IPAddress &ip, uint16_t port) override {
-    return udp_.beginPacket(ip, port);
-  }
-  size_t write(const uint8_t *data, size_t len) override {
-    return udp_.write(data, len);
-  }
-  int endPacket() override { return udp_.endPacket(); }
-
- private:
-  WiFiUDP udp_;
-};
-#endif
-
-#ifdef USE_ESP_IDF
-#include <arpa/inet.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#include <lwip/sockets.h>
-
-class EspIdfUdpTransport : public UdpTransport {
- public:
-  ~EspIdfUdpTransport() override {
-    if (sockfd_ >= 0) {
-      close(sockfd_);
-    }
-  }
-
-  int begin(uint16_t port) override {
-    if (sockfd_ >= 0) {
-      close(sockfd_);
-      sockfd_ = -1;
-    }
-
-    sockfd_ = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd_ < 0) {
-      ESP_LOGE("wago_netvar", "Failed to create UDP socket");
-      return 0;
-    }
-
-    int flags = fcntl(sockfd_, F_GETFL, 0);
-    if (flags >= 0) {
-      fcntl(sockfd_, F_SETFL, flags | O_NONBLOCK);
-    }
-
-    // Zezwól na wysyłkę broadcast (np. 255.255.255.255) zgodnie z założeniami.
-    int broadcast = 1;
-    setsockopt(sockfd_, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons(port);
-
-    if (bind(sockfd_, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0) {
-      ESP_LOGE("wago_netvar", "Failed to bind UDP socket to port %u", port);
-      close(sockfd_);
-      sockfd_ = -1;
-      return 0;
-    }
-
-    return 1;
-  }
-
-  int parsePacket() override {
-    if (sockfd_ < 0)
-      return 0;
-
-    struct sockaddr_in sender;
-    socklen_t sender_len = sizeof(sender);
-    memset(&sender, 0, sizeof(sender));
-
-    // Odbierz pakiet i usuń go z kolejki gniazda (bez MSG_PEEK), aby ten sam pakiet
-    // nie był przetwarzany wielokrotnie w pętli loop().
-    int len = recvfrom(sockfd_, rx_buffer_, sizeof(rx_buffer_), MSG_DONTWAIT,
-                       reinterpret_cast<struct sockaddr *>(&sender), &sender_len);
-    if (len < 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK)
-        return 0;
-      ESP_LOGE("wago_netvar", "UDP recvfrom error");
-      return 0;
-    }
-
-    rx_len_ = len;
-    rx_offset_ = 0;
-    uint32_t ip = ntohl(sender.sin_addr.s_addr);
-    remote_ip_ = IPAddress((ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
-    remote_port_ = ntohs(sender.sin_port);
-    return len;
-  }
-
-  int read(uint8_t *data, size_t len) override {
-    if (sockfd_ < 0 || rx_len_ <= 0)
-      return 0;
-
-    size_t remaining = static_cast<size_t>(rx_len_) - rx_offset_;
-    size_t to_copy = std::min<size_t>(len, remaining);
-    memcpy(data, rx_buffer_ + rx_offset_, to_copy);
-    rx_offset_ += to_copy;
-    if (rx_offset_ >= static_cast<size_t>(rx_len_))
-      rx_len_ = 0;
-    return static_cast<int>(to_copy);
-  }
-
-  int available() override {
-    if (rx_len_ <= 0)
-      return 0;
-    return rx_len_ - static_cast<int>(rx_offset_);
-  }
-
-  IPAddress remoteIP() override { return remote_ip_; }
-  uint16_t remotePort() override { return remote_port_; }
-
-  bool beginPacket(const IPAddress &ip, uint16_t port) override {
-    target_ip_ = ip;
-    target_port_ = port;
-    tx_buffer_.clear();
-    return true;
-  }
-
-  size_t write(const uint8_t *data, size_t len) override {
-    tx_buffer_.insert(tx_buffer_.end(), data, data + len);
-    return len;
-  }
-
-  int endPacket() override {
-    if (sockfd_ < 0)
-      return 0;
-
-    struct sockaddr_in target;
-    memset(&target, 0, sizeof(target));
-    target.sin_family = AF_INET;
-    target.sin_port = htons(target_port_);
-
-    uint32_t ip = (static_cast<uint32_t>(target_ip_[0]) << 24) |
-                  (static_cast<uint32_t>(target_ip_[1]) << 16) |
-                  (static_cast<uint32_t>(target_ip_[2]) << 8) |
-                  static_cast<uint32_t>(target_ip_[3]);
-    target.sin_addr.s_addr = htonl(ip);
-
-    int sent = sendto(sockfd_, tx_buffer_.data(), tx_buffer_.size(), 0,
-                      reinterpret_cast<struct sockaddr *>(&target), sizeof(target));
-    tx_buffer_.clear();
-
-    if (sent < 0) {
-      ESP_LOGE("wago_netvar", "UDP sendto error");
-      return 0;
-    }
-    return 1;
-  }
-
- private:
-  int sockfd_{-1};
-  uint8_t rx_buffer_[NETVAR_MAX_PACKET_SIZE]{};
-  int rx_len_{0};
-  size_t rx_offset_{0};
-  IPAddress remote_ip_;
-  uint16_t remote_port_{0};
-  IPAddress target_ip_;
-  uint16_t target_port_{0};
-  std::vector<uint8_t> tx_buffer_;
-};
-#endif
-
-#ifdef USE_SWITCH
 class WagoSwitch : public switch_::Switch {
  public:
-  void set_parent(WagoNetVarComponent *parent,
-                  const std::string &var_name) {
-    parent_ = parent;
-    var_name_ = var_name;
+  void set_parent(WagoNetVarComponent *parent, const std::string &var_name) {
+    this->parent_ = parent;
+    this->var_name_ = var_name;
   }
 
  protected:
@@ -251,15 +57,12 @@ class WagoSwitch : public switch_::Switch {
   WagoNetVarComponent *parent_{nullptr};
   std::string var_name_;
 };
-#endif
 
-#ifdef USE_NUMBER
 class WagoNumber : public number::Number {
  public:
-  void set_parent(WagoNetVarComponent *parent,
-                  const std::string &var_name) {
-    parent_ = parent;
-    var_name_ = var_name;
+  void set_parent(WagoNetVarComponent *parent, const std::string &var_name) {
+    this->parent_ = parent;
+    this->var_name_ = var_name;
   }
 
  protected:
@@ -268,7 +71,6 @@ class WagoNumber : public number::Number {
   WagoNetVarComponent *parent_{nullptr};
   std::string var_name_;
 };
-#endif
 
 enum class VariableType : uint8_t {
   BOOL,
@@ -292,156 +94,123 @@ enum class VariableType : uint8_t {
 struct VarDef {
   std::string name;
   std::string type_name;
-
   VariableType type{VariableType::BOOL};
-
   size_t size{0};
-  size_t alignment{1};
+  size_t byte_offset{0};  // resolved at compile time by the Python code generator
 
-  size_t byte_offset{0};
-  bool has_manual_offset{false};
-
-#ifdef USE_SENSOR
   sensor::Sensor *sensor_ptr{nullptr};
-#endif
-
-#ifdef USE_BINARY_SENSOR
   binary_sensor::BinarySensor *binary_sensor_ptr{nullptr};
-#endif
-
-#ifdef USE_TEXT_SENSOR
   text_sensor::TextSensor *text_sensor_ptr{nullptr};
-#endif
-
-#ifdef USE_SWITCH
   switch_::Switch *switch_ptr{nullptr};
-#endif
-
-#ifdef USE_NUMBER
   number::Number *number_ptr{nullptr};
-#endif
 };
 
+/// update_interval (PollingComponent) drives the cyclic transmission in "write" mode.
+/// update_interval: never (also "0s", converted by the Python validator) disables it.
 class WagoNetVarComponent : public PollingComponent {
  public:
-  void set_ip_address(const std::string &ip) {
-    ip_address_ = ip;
-  }
-
-  void set_port(uint16_t port) {
-    port_ = port;
-  }
-
-  void set_list_id(uint16_t list_id) {
-    list_id_ = list_id;
-  }
-
-  void set_var_count(uint16_t var_count) {
-    var_count_ = var_count;
-  }
-
+  // ---- configuration (called from generated code) ----
+  void set_ip_address(const std::string &ip) { this->ip_address_ = ip; }
+  void set_port(uint16_t port) { this->port_ = port; }
+  void set_list_id(uint16_t list_id) { this->list_id_ = list_id; }
+  void set_var_count(uint16_t var_count) { this->var_count_ = var_count; }
   void set_direction(const std::string &direction) {
-    enable_read_ = (direction == "read");
-    enable_write_ = (direction == "write");
+    this->enable_read_ = (direction == "read");
+    this->enable_write_ = (direction == "write");
   }
+  void set_alignment(bool alignment) { this->alignment_ = alignment; }
+  void set_send_on_change(bool enable) { this->send_on_change_ = enable; }
+  void set_min_interval(uint32_t ms) { this->min_interval_ms_ = ms; }
 
-  void set_alignment(bool align) {
-    alignment_ = align;
-  }
+  void add_variable(const std::string &name, const std::string &type, uint16_t byte_offset);
 
-  void set_send_on_change(bool enable) {
-    send_on_change_ = enable;
-  }
+  void register_sensor(const std::string &name, sensor::Sensor *entity);
+  void register_binary_sensor(const std::string &name, binary_sensor::BinarySensor *entity);
+  void register_text_sensor(const std::string &name, text_sensor::TextSensor *entity);
+  void register_switch(const std::string &name, switch_::Switch *entity);
+  void register_number(const std::string &name, number::Number *entity);
 
-  void set_min_interval(uint32_t ms) {
-    min_interval_ms_ = ms;
-  }
+  void set_rejected_packets_sensor(sensor::Sensor *sensor) { this->rejected_packets_sensor_ = sensor; }
+  void set_rx_packets_sensor(sensor::Sensor *sensor) { this->rx_packets_sensor_ = sensor; }
+  void set_tx_packets_sensor(sensor::Sensor *sensor) { this->tx_packets_sensor_ = sensor; }
+  void set_rx_errors_sensor(sensor::Sensor *sensor) { this->rx_errors_sensor_ = sensor; }
+  void set_tx_errors_sensor(sensor::Sensor *sensor) { this->tx_errors_sensor_ = sensor; }
 
-  void set_update_interval(uint32_t ms) {
-    update_interval_ms_ = ms;
-  }
-
-  void add_variable(const std::string &name,
-                    const std::string &type,
-                    int byte_offset);
-
-#ifdef USE_SENSOR
-  void register_sensor(const std::string &name,
-                       sensor::Sensor *entity);
-  void set_rejected_packets_sensor(sensor::Sensor *sensor) {
-    rejected_packets_sensor_ = sensor;
-  }
-  void set_rx_packets_sensor(sensor::Sensor *sensor) {
-    rx_packets_sensor_ = sensor;
-  }
-  void set_tx_packets_sensor(sensor::Sensor *sensor) {
-    tx_packets_sensor_ = sensor;
-  }
-  void set_rx_errors_sensor(sensor::Sensor *sensor) {
-    rx_errors_sensor_ = sensor;
-  }
-  void set_tx_errors_sensor(sensor::Sensor *sensor) {
-    tx_errors_sensor_ = sensor;
-  }
-#endif
-
-#ifdef USE_BINARY_SENSOR
-  void register_binary_sensor(const std::string &name,
-                              binary_sensor::BinarySensor *entity);
-#endif
-
-#ifdef USE_TEXT_SENSOR
-  void register_text_sensor(const std::string &name,
-                            text_sensor::TextSensor *entity);
-#endif
-
-#ifdef USE_SWITCH
-  void register_switch(const std::string &name,
-                       switch_::Switch *entity);
-#endif
-
-#ifdef USE_NUMBER
-  void register_number(const std::string &name,
-                       number::Number *entity);
-#endif
-
+  // ---- runtime API (usable from lambdas, switches and numbers); "write" lists only ----
+  // Values are converted to the NetVar type of the variable. On integer overflow the least significant
+  // bytes are kept. Numbers written to a STRING variable are converted to text.
   void set_variable_value(const std::string &name, bool value);
-  void set_variable_value(const std::string &name, float value);
   void set_variable_value(const std::string &name, int value);
-  void set_variable_value(const std::string &name,
-                          const std::string &value);
+  void set_variable_value(const std::string &name, float value);
+  void set_variable_value(const std::string &name, const std::string &value);
+  // Without this overload a string literal would silently select the bool overload.
+  void set_variable_value(const std::string &name, const char *value) {
+    this->set_variable_value(name, std::string(value));
+  }
 
+  /// Last value of a variable (sent value in "write" mode, last decoded value in "read" mode).
   std::string get_variable_value(const std::string &name) const;
 
+  // ---- Component ----
   void setup() override;
   void loop() override;
   void update() override;
   void dump_config() override;
-
-  float get_setup_priority() const override {
-    return setup_priority::AFTER_WIFI;
-  }
+  float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
 
  protected:
-  std::string ip_address_;
+  static constexpr size_t STATS_COUNT = 5;
 
+  // helpers: configuration
+  VarDef *get_var(const std::string &name);
+  const VarDef *get_var(const std::string &name) const;
+  void fail_config_(const char *what, const std::string &name);
+  bool finalize_layout_();
+
+  // helpers: transport
+  bool ensure_udp_();
+  void receive_packets_();
+  bool validate_packet_(size_t packet_size, uint32_t remote_ip);
+  void unpack_payload_(const uint8_t *payload);
+  void publish_variable_(const VarDef &var);
+  void publish_statistics_();
+
+  void trigger_send_();
+  void send_packet_();
+
+  // helpers: value conversion
+  VarDef *prepare_write_(const std::string &name);
+  void commit_(const VarDef &var, const uint8_t *bytes);
+  void write_int64_(VarDef &var, int64_t value);
+  void write_double_(VarDef &var, double value);
+  void write_text_(VarDef &var, const std::string &text);
+  double decode_number_(const VarDef &var, const uint8_t *data) const;
+
+  // configuration
+  std::string ip_address_;
+  uint32_t ip_{0};
   uint16_t port_{1202};
   uint16_t list_id_{1};
   uint16_t var_count_{0};
-
   bool enable_read_{false};
   bool enable_write_{true};
-
   bool alignment_{false};
   bool send_on_change_{false};
-
   uint32_t min_interval_ms_{500};
-  uint32_t update_interval_ms_{5000};
-  uint32_t last_sent_time_{0};
+  bool config_error_{false};
+
+  // state
+  std::vector<VarDef> variables_;
+  size_t payload_size_{0};
+  std::vector<uint8_t> payload_;  // current variable values
+  std::vector<uint8_t> frame_;    // scratch buffer: RX datagram (read) or TX frame (write)
+  std::unique_ptr<UdpTransport> udp_;
+  bool udp_started_{false};
+  bool udp_attempted_{false};
+  uint32_t last_udp_attempt_{0};
 
   bool is_dirty_{false};
-  bool udp_started_{false};
-
+  uint32_t last_sent_time_{0};
   uint16_t sequence_counter_{1};
 
   uint32_t rx_packets_{0};
@@ -449,51 +218,14 @@ class WagoNetVarComponent : public PollingComponent {
   uint32_t rx_errors_{0};
   uint32_t tx_errors_{0};
   uint32_t rejected_packets_{0};
+  uint32_t published_stats_[STATS_COUNT];
+  uint32_t last_stats_time_{0};
 
-  std::unique_ptr<UdpTransport> udp_;
-
-  std::vector<VarDef> variables_;
-  size_t payload_size_{0};
-
-  std::vector<uint8_t> tx_buffer_;
-  std::array<uint8_t, NETVAR_MAX_PACKET_SIZE> rx_packet_buffer_{};
-
-#ifdef USE_SENSOR
   sensor::Sensor *rejected_packets_sensor_{nullptr};
   sensor::Sensor *rx_packets_sensor_{nullptr};
   sensor::Sensor *tx_packets_sensor_{nullptr};
   sensor::Sensor *rx_errors_sensor_{nullptr};
   sensor::Sensor *tx_errors_sensor_{nullptr};
-#endif
-
-  VarDef *get_var(const std::string &name);
-  const VarDef *get_var(const std::string &name) const;
-
-  bool get_type_info(const std::string &type,
-                     VariableType &variable_type,
-                     size_t &size,
-                     size_t &alignment);
-
-  bool calculate_layout_();
-
-  bool validate_packet_(size_t packet_size,
-                        const IPAddress &remote_ip,
-                        uint16_t remote_port);
-
-  void unpack_payload_(const uint8_t *payload,
-                       size_t length);
-
-  void send_packet_();
-  void trigger_send_();
-  void publish_statistics_();
-
-  bool write_integer_(VarDef &var, uint64_t value);
-  uint64_t read_integer_(const uint8_t *data, size_t size) const;
-
-  void publish_variable_(VarDef &var, const uint8_t *payload);
-
-  uint16_t read_u16_(const uint8_t *data) const;
-  void write_u16_(uint8_t *data, uint16_t value) const;
 };
 
 }  // namespace wago_netvar
