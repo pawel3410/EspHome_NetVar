@@ -672,11 +672,11 @@ std::string WagoNetVarComponent::get_variable_value(const std::string &name) con
 
   switch (var->type) {
     case VariableType::SINT:
-      return std::to_string(static_cast<int8_t>(raw));
+      return std::to_string(static_cast<int8_t>(static_cast<uint8_t>(raw)));
     case VariableType::INT:
-      return std::to_string(static_cast<int16_t>(raw));
+      return std::to_string(static_cast<int16_t>(static_cast<uint16_t>(raw)));
     case VariableType::DINT:
-      return std::to_string(static_cast<int32_t>(raw));
+      return std::to_string(static_cast<int32_t>(static_cast<uint32_t>(raw)));
     default:
       return std::to_string(raw);
   }
@@ -706,8 +706,9 @@ void WagoNetVarComponent::loop() {
 
       if (static_cast<size_t>(packet_size) > NETVAR_MAX_PACKET_SIZE) {
         ++rejected_packets_;
-        while (udp_->available())
-          udp_->read();
+        uint8_t dummy[NETVAR_MAX_PACKET_SIZE];
+        while (udp_->available() > 0)
+          udp_->read(dummy, sizeof(dummy));
         continue;
       }
 
@@ -727,6 +728,10 @@ void WagoNetVarComponent::loop() {
           rx_packet_buffer_.data() + NETVAR_HEADER_SIZE,
           static_cast<size_t>(packet_size) - NETVAR_HEADER_SIZE);
     }
+  }
+
+  if (enable_write_) {
+    trigger_send_();
   }
 }
 
@@ -833,15 +838,15 @@ void WagoNetVarComponent::publish_variable_(VarDef &var, const uint8_t *payload)
     int64_t signed_value = static_cast<int64_t>(raw);
     switch (var.type) {
       case VariableType::SINT:
-        signed_value = static_cast<int8_t>(raw);
+        signed_value = static_cast<int8_t>(static_cast<uint8_t>(raw));
         value = static_cast<double>(signed_value);
         break;
       case VariableType::INT:
-        signed_value = static_cast<int16_t>(raw);
+        signed_value = static_cast<int16_t>(static_cast<uint16_t>(raw));
         value = static_cast<double>(signed_value);
         break;
       case VariableType::DINT:
-        signed_value = static_cast<int32_t>(raw);
+        signed_value = static_cast<int32_t>(static_cast<uint32_t>(raw));
         value = static_cast<double>(signed_value);
         break;
       default:
@@ -909,17 +914,18 @@ void WagoNetVarComponent::send_packet_() {
     return;
   }
 
-  if (udp_->write(header, NETVAR_HEADER_SIZE) != NETVAR_HEADER_SIZE) {
+  bool write_ok = true;
+  if (udp_->write(header, NETVAR_HEADER_SIZE) != NETVAR_HEADER_SIZE)
+    write_ok = false;
+  if (udp_->write(tx_buffer_.data(), payload_size_) != payload_size_)
+    write_ok = false;
+
+  if (udp_->endPacket() != 1) {
     ++tx_errors_;
     return;
   }
 
-  if (udp_->write(tx_buffer_.data(), payload_size_) != payload_size_) {
-    ++tx_errors_;
-    return;
-  }
-  
-  if (udp_->endPacket() != 1) {
+  if (!write_ok) {
     ++tx_errors_;
     return;
   }
