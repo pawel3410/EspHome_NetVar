@@ -7,7 +7,8 @@ Komponent umożliwia wymianę danych między ESPHome a sterownikami WAGO (lub in
 - ESPHome oraz moduł z siecią Wi-Fi lub Ethernet (ESP32 / ESP8266).
 - Wsparcie dla platform Arduino oraz ESP-IDF.
 - Pojedyncza instancja działa w trybie `read` **albo** `write`. Można zdefiniować wiele instancji (np. jedną do odczytu, drugą do zapisu).
-- Każda lista `read` nasłuchuje na własnym porcie UDP – dwie listy `read` nie mogą używać tego samego portu (sprawdza to walidacja konfiguracji). Listy `write` nie zajmują portu lokalnego, więc mogą używać tego samego numeru portu co lista `read`.
+- Wiele list `read` może nasłuchiwać na tym samym porcie UDP (np. listy 100 i 101 na porcie 1202). Komponent otwiera wtedy jedno współdzielone gniazdo na port, a odebrane ramki rozdziela między listy według `list_id` (oraz adresu nadawcy). Listy nie kolidują ze sobą, jeśli różnią się `list_id`, albo tym samym `list_id`, ale różnymi, konkretnymi adresami `ip_address` (nie `0.0.0.0`). Walidacja konfiguracji odrzuca jedynie listy nie do odróżnienia (ten sam port, `list_id` i nadawca).
+- Listy `write` nie zajmują portu lokalnego (wysyłają z portu przydzielonego przez system), więc mogą używać tego samego numeru portu co listy `read`.
 
 ## Struktura ramki NetVar
 
@@ -63,14 +64,13 @@ Zmienne definiuje się w sekcji `variables:`. Encje (sensory, przełączniki, it
 |-------|----------|----------|------|
 | `id` | Tak | – | Unikalny identyfikator komponentu ESPHome (używany też do nazw automatycznych sensorów statystyk). |
 | `ip_address` | Tak | – | Adres IPv4 odbiorcy/nadawcy. W trybie `read` może być `0.0.0.0` (akceptuj pakiety z dowolnego IP); `255.255.255.255` jest tam niedozwolony. W trybie `write` nie może być `0.0.0.0` (dozwolony broadcast `255.255.255.255`). |
-| `port` | Nie | `1202` | Port UDP: w trybie `read` port nasłuchu, w trybie `write` port docelowy. |
-| `list_id` | Nie | `1` | Identyfikator listy NetVar (bajty 8–9 ramki). |
+| `port` | Nie | `1202` | Port UDP: w trybie `read` port nasłuchu (może być wspólny dla wielu list `read`), w trybie `write` port docelowy. |
+| `list_id` | Nie | `1` | Identyfikator listy NetVar (bajty 8–9 ramki). W trybie `read` służy do rozdzielania ramek między listy współdzielące port. |
 | `var_count` | Nie | `0` | Liczba zmiennych na liście NetVar (bajty 12–13). Jeśli `0`, zostanie ustawiona na liczbę zdefiniowanych zmiennych. Może być **większa** niż liczba zdefiniowanych zmiennych (gdy część zmiennych listy jest pomijana), ale nie mniejsza. |
 | `direction` | Nie | `write` | Kierunek komunikacji: `read` (odbiór) lub `write` (wysyłka). |
-| `alignment` | Nie | `false` | Czy zmiennym bez `byte_offset` przydzielać offsety wyrównane do rozmiaru typu (2 bajty dla WORD/UINT/INT, 4 bajty dla DWORD/UDINT/DINT/TIME/DATE/TOD/DT/REAL). |
-| `send_on_change` | Nie | `false` | Czy wysyłać ramkę natychmiast po zmianie wartości zmiennej (tryb `write`). |
+| `send_on_change` | Nie | `false` | Czy wysyłać ramkę po zmianie wartości zmiennej (tryb `write`). Zmiany wykonane w tej samej iteracji pętli (np. kilka `set_variable_value()` w jednej lambdzie) trafiają do jednej ramki. |
 | `min_interval` | Nie | `500ms` | Minimalny odstęp czasu między wysyłkami przy `send_on_change: true`. |
-| `update_interval` | Nie | `5s` | Interwał cyklicznej wysyłki ramki w trybie `write`. `0s` (lub `never`) wyłącza wysyłkę cykliczną. Działa równolegle z `send_on_change`. |
+| `update_interval` | Nie | `5s` | Interwał cyklicznej wysyłki ramki w trybie `write`. `0s` (lub `never`) wyłącza wysyłkę cykliczną. Działa równolegle z `send_on_change`. W trybie `read` jest ignorowany. |
 | `variables` | Tak | – | Lista zdefiniowanych zmiennych NetVar. |
 | `sensors` | Nie | – | Mapowanie zmiennych numerycznych na sensory (tylko `read`). |
 | `binary_sensors` | Nie | – | Mapowanie zmiennych BOOL na binary_sensor (tylko `read`). |
@@ -89,9 +89,9 @@ Każda zmienna w sekcji `variables` wymaga:
 
 - `name` – nazwa zmiennej (unikalna w obrębie listy).
 - `type` – typ NetVar (np. `BOOL`, `UINT`, `REAL`, `STRING(20)`).
-- `byte_offset` (opcjonalnie) – offset w bajtach w ładunku (0–1451). W trybie `read` jest wymagany dla każdej zmiennej. W trybie `write` może być pominięty – wtedy offset jest przydzielany automatycznie (zmienne z ręcznym offsetem mają pierwszeństwo, a przydzielane automatycznie omijają zajęte bajty).
+- `byte_offset` – offset w bajtach w ładunku (0–1451), **wymagany w obu trybach**. W trybie `read` pozwala pominąć odczyt wybranych zmiennych (luki w ładunku), w trybie `write` bajty bez zmiennej pozostają zerami.
 
-Układ pamięci jest wyliczany raz, podczas walidacji konfiguracji (Python), a do kodu C++ trafiają gotowe offsety. Nakładające się zmienne i przekroczenie 1452 bajtów ładunku powodują błąd konfiguracji.
+Układ pamięci jest sprawdzany raz, podczas walidacji konfiguracji (Python). Nakładające się zmienne i przekroczenie 1452 bajtów ładunku powodują błąd konfiguracji.
 
 ### Przykłady konfiguracji
 
@@ -126,7 +126,38 @@ wago_netvar:
     name: "Odrzucone ramki"    # opcjonalnie: własna nazwa/ustawienia sensora statystyk
 ```
 
-#### Przykład 2: Zapis (write) z automatycznymi offsetami i wysyłką przy zmianie
+#### Przykład 1b: Dwie listy odczytu na tym samym porcie
+
+```yaml
+wago_netvar:
+  - id: wago_read_100
+    ip_address: "192.168.1.50"
+    port: 1202
+    list_id: 100
+    direction: read
+    variables:
+      - name: "temp"
+        type: "REAL"
+        byte_offset: 0
+    sensors:
+      - variable: "temp"
+        name: "Temperatura"
+
+  - id: wago_read_101
+    ip_address: "192.168.1.50"
+    port: 1202                 # ten sam port co lista 100 – nie koliduje, ramki rozdziela list_id
+    list_id: 101
+    direction: read
+    variables:
+      - name: "pressure"
+        type: "REAL"
+        byte_offset: 0
+    sensors:
+      - variable: "pressure"
+        name: "Ciśnienie"
+```
+
+#### Przykład 2: Zapis (write) z wysyłką przy zmianie
 
 ```yaml
 wago_netvar:
@@ -138,12 +169,13 @@ wago_netvar:
   send_on_change: true
   min_interval: "1000ms"
   update_interval: "5s"
-  alignment: true
   variables:
     - name: "setpoint"
       type: "REAL"
+      byte_offset: 0
     - name: "pump_on"
       type: "BOOL"
+      byte_offset: 4
   switches:
     - variable: "pump_on"
       name: "Pompa"
@@ -167,6 +199,7 @@ wago_netvar:
   variables:
     - name: "heartbeat"
       type: "BOOL"
+      byte_offset: 0
 ```
 
 #### Przykład 4: Zapis z lambdy
@@ -180,11 +213,11 @@ interval:
           id(wago_write).set_variable_value("pump_on", true);
 ```
 
-Dostępne przeciążenia `set_variable_value(nazwa, wartość)`: `bool`, `int`, `float`, `std::string` oraz `const char *`. `get_variable_value(nazwa)` zwraca ostatnią wartość zmiennej jako tekst.
+Dostępne przeciążenia `set_variable_value(nazwa, wartość)`: `bool`, dowolny typ arytmetyczny (`int`, `uint32_t`, `float`, `double`, …), `std::string` oraz `const char *`. `get_variable_value(nazwa)` zwraca ostatnią wartość zmiennej jako tekst.
 
 ## Walidacja ramek (tryb read)
 
-Każda przychodząca ramka jest walidowana pod kątem:
+Wszystkie listy `read` na jednym porcie korzystają z jednego gniazda. Każdy datagram jest odbierany raz, a następnie przekazywany do list o zgodnym `list_id` (bajty 8–9); ramka jest dekodowana przez listę, która przejdzie pełną walidację. Każda lista walidowana jest pod kątem:
 
 - adresu IP nadawcy (jeśli `ip_address` różne od `0.0.0.0`),
 - portu docelowego (niejawnie przez bindowanie gniazda UDP do `port`),
@@ -193,6 +226,11 @@ Każda przychodząca ramka jest walidowana pod kątem:
 - var_count (bajty 12–13) zgodnie z konfiguracją,
 - frame_size (bajty 14–15) zgodnie z rozmiarem otrzymanego pakietu,
 - rozmiaru ładunku: musi obejmować wszystkie zdefiniowane zmienne (ramka może być dłuższa – zmienne za ostatnią zdefiniowaną są pomijane).
+
+Zliczanie odrzuconych ramek (`rejected_packets`) przy współdzielonym porcie:
+
+- ramka, której nie da się przypisać do listy (za duża, za krótka, błędne magic bytes) lub o `list_id`, którego żadna lista tego portu nie obsługuje – jest zliczana na wszystkich listach `read` tego portu,
+- ramka o `list_id` obsługiwanym przez listy tego portu, której żadna z nich nie przyjęła (np. zły adres nadawcy, `var_count`, `frame_size`) – jest zliczana tylko na listach o tym `list_id`.
 
 Pola sequence_counter (bajty 16–17) oraz checksum (bajty 18–19) są odczytywane, ale nie walidowane. Przy wysyłce checksum jest zerowane. Każda ramka, która przejdzie walidację, jest w całości dekodowana i publikowana do zmapowanych encji; pozostałe są liczone w `rejected_packets`.
 
@@ -212,13 +250,13 @@ Wartości są publikowane co najwyżej raz na sekundę i tylko po zmianie.
 
 - Wszystkie liczby są przesyłane w formacie little endian.
 - Wysyłana wartość jest konwertowana na typ zmiennej. Przy przepełnieniu typu całkowitego zachowywane są najmniej znaczące bajty, a nadmiarowe, najbardziej znaczące, są odrzucane (np. `70000` zapisane do INT daje `4464`). Wartości zmiennoprzecinkowe zapisywane do typów całkowitych są zaokrąglane do najbliższej liczby całkowitej.
-- Liczby zapisywane do zmiennej STRING są zamieniane na tekst ASCII; tekst dłuższy niż `n` znaków jest ucinany, a znaki spoza ASCII są odrzucane.
+- Liczby zapisywane do zmiennej STRING są zamieniane na tekst ASCII; tekst dłuższy niż `n` znaków jest ucinany, a tekst zawierający znaki spoza ASCII jest w całości odrzucany (ostrzeżenie w logu).
 - Tekst zapisywany do zmiennej liczbowej musi być w całości poprawną liczbą (np. `12abc` jest odrzucane). Dla BOOL akceptowane są: `1/0`, `true/false`, `on/off`, `yes/no` (bez rozróżniania wielkości liter).
 - Sensory ESPHome używają liczb `float` (24 bity mantysy), więc wartości 32-bitowych typów całkowitych powyżej ok. 16 777 216 są w encji zaokrąglane. Pełna wartość jest dostępna przez `get_variable_value()`.
 - Nieskończona lub nieliczbowa wartość REAL (NaN/Inf) jest publikowana jako NaN (stan „unknown”).
-- W trybie `read` offsety zmiennych muszą być podane ręcznie (`byte_offset`), co pozwala pominąć odczyt niektórych zmiennych poprzez pozostawienie luk w ładunku.
+- Offsety zmiennych (`byte_offset`) zawsze podaje się ręcznie – w trybie `read` pozwala to pominąć odczyt niektórych zmiennych (luki w ładunku), w trybie `write` odwzorować układ listy zmiennych sterownika.
 - W trybie `write` bufor po starcie zawiera zera – do czasu ustawienia wartości (np. przez `switch`/`number`) wysyłane są zera. Stan encji `switch`/`number` nie jest odtwarzany po restarcie.
-- Wysyłka i odbiór działają dopiero po uzyskaniu połączenia sieciowego; gniazdo UDP jest otwierane automatycznie (z ponawianiem co 5 s).
+- Wysyłka i odbiór działają dopiero po uzyskaniu połączenia sieciowego; gniazdo UDP jest otwierane automatycznie (z ponawianiem co 5 s, także po błędzie odbioru).
 
 ## Wsparcie platform
 
