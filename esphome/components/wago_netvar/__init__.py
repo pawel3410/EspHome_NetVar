@@ -20,16 +20,16 @@ from esphome.const import (
 
 DOMAIN = "wago_netvar"
 
-# "network" instead of "wifi": the component works over Wi-Fi as well as Ethernet.
+# "network" zamiast "wifi": komponent działa zarówno przez Wi-Fi, jak i Ethernet.
 DEPENDENCIES = ["network"]
-# The component creates entities of all these kinds (statistics sensors are created automatically).
+# Komponent tworzy encje wszystkich tych rodzajów (sensory statystyk powstają automatycznie).
 AUTO_LOAD = ["sensor", "binary_sensor", "text_sensor", "switch", "number"]
 MULTI_CONF = True
 
 MAX_UDP_PACKET_SIZE = 1472
 NETVAR_HEADER_SIZE = 20
 MAX_PAYLOAD_SIZE = MAX_UDP_PACKET_SIZE - NETVAR_HEADER_SIZE
-SCHEDULER_DONT_RUN = 4294967295  # the value ESPHome uses for "update_interval: never"
+SCHEDULER_DONT_RUN = 4294967295  # wartość używana przez ESPHome dla "update_interval: never"
 
 wago_netvar_ns = cg.esphome_ns.namespace("wago_netvar")
 
@@ -40,7 +40,6 @@ WagoNumber = wago_netvar_ns.class_("WagoNumber", number.Number)
 CONF_LIST_ID = "list_id"
 CONF_VAR_COUNT = "var_count"
 CONF_DIRECTION = "direction"
-CONF_ALIGNMENT = "alignment"
 CONF_SEND_ON_CHANGE = "send_on_change"
 CONF_MIN_INTERVAL = "min_interval"
 
@@ -62,7 +61,7 @@ CONF_TX_PACKETS = "tx_packets"
 CONF_RX_ERRORS = "rx_errors"
 CONF_TX_ERRORS = "tx_errors"
 
-# configuration key -> (setter name in C++, default entity name suffix)
+# klucz konfiguracji -> (nazwa settera w C++, domyślny przyrostek nazwy encji)
 STATS_SENSORS = {
     CONF_REJECTED_PACKETS: ("set_rejected_packets_sensor", "rejected packets"),
     CONF_RX_PACKETS: ("set_rx_packets_sensor", "rx packets"),
@@ -76,32 +75,34 @@ TYPE_ALIASES = {
     "DT": "DATE_AND_TIME",
 }
 
-# type -> (size in bytes, alignment in bytes); LREAL is intentionally absent (not supported by NetVar)
-TYPE_INFO = {
-    "BOOL": (1, 1),
-    "BYTE": (1, 1),
-    "USINT": (1, 1),
-    "SINT": (1, 1),
-    "WORD": (2, 2),
-    "UINT": (2, 2),
-    "INT": (2, 2),
-    "DWORD": (4, 4),
-    "UDINT": (4, 4),
-    "DINT": (4, 4),
-    "TIME": (4, 4),
-    "DATE": (4, 4),
-    "TIME_OF_DAY": (4, 4),
-    "DATE_AND_TIME": (4, 4),
-    "REAL": (4, 4),
+# typ -> rozmiar w bajtach; LREAL celowo pominięty (nieobsługiwany przez NetVar)
+TYPE_SIZES = {
+    "BOOL": 1,
+    "BYTE": 1,
+    "USINT": 1,
+    "SINT": 1,
+    "WORD": 2,
+    "UINT": 2,
+    "INT": 2,
+    "DWORD": 4,
+    "UDINT": 4,
+    "DINT": 4,
+    "TIME": 4,
+    "DATE": 4,
+    "TIME_OF_DAY": 4,
+    "DATE_AND_TIME": 4,
+    "REAL": 4,
 }
 
-NUMERIC_TYPES = set(TYPE_INFO) - {"BOOL"}
+NUMERIC_TYPES = set(TYPE_SIZES) - {"BOOL"}
 
+# Offset jest wymagany zawsze (zarówno dla "read", jak i "write"): dzięki temu w trybie "read"
+# można pominąć wybrane zmienne, a w trybie "write" układ ramki jest jawny i zgodny ze sterownikiem.
 VARIABLE_SCHEMA = cv.Schema(
     {
         cv.Required(CONF_VAR_NAME): cv.string_strict,
         cv.Required(CONF_VAR_TYPE): cv.string_strict,
-        cv.Optional(CONF_BYTE_OFFSET): cv.int_range(min=0, max=MAX_PAYLOAD_SIZE - 1),
+        cv.Required(CONF_BYTE_OFFSET): cv.int_range(min=0, max=MAX_PAYLOAD_SIZE - 1),
     }
 )
 
@@ -121,7 +122,7 @@ SWITCH_SCHEMA = switch.switch_schema(WagoSwitch).extend(
     {cv.Required(CONF_VARIABLE): cv.string_strict}
 )
 
-# number.new_number() needs min_value / max_value / step, so they have to be part of the schema.
+# number.new_number() wymaga min_value / max_value / step, więc muszą być częścią schematu.
 NUMBER_SCHEMA = number.number_schema(WagoNumber).extend(
     {
         cv.Required(CONF_VARIABLE): cv.string_strict,
@@ -139,10 +140,11 @@ STATS_SENSOR_SCHEMA = sensor.sensor_schema(
 
 
 def validate_variable_type(value):
+    """Normalizuje nazwę typu (wielkość liter, aliasy, STRING bez długości = STRING(80))."""
     value = value.strip().upper()
     value = TYPE_ALIASES.get(value, value)
 
-    if value in TYPE_INFO:
+    if value in TYPE_SIZES:
         return value
 
     match = re.fullmatch(r"STRING(?:\((\d+)\))?", value)
@@ -163,30 +165,19 @@ def is_string_type(type_name):
 
 def get_type_size(type_name):
     if is_string_type(type_name):
-        return int(type_name[7:-1]) + 1  # + terminating 0x00
-    return TYPE_INFO[type_name][0]
-
-
-def get_type_alignment(type_name):
-    if is_string_type(type_name):
-        return 1
-    return TYPE_INFO[type_name][1]
+        return int(type_name[7:-1]) + 1  # + kończący bajt 0x00
+    return TYPE_SIZES[type_name]
 
 
 def ranges_overlap(start_a, size_a, start_b, size_b):
     return start_a < start_b + size_b and start_b < start_a + size_a
 
 
-def calculate_layout(variables, alignment):
-    """Returns ({name: offset}, payload_size). Manual offsets first, then automatic placement."""
-    reserved = []  # (name, offset, size)
-    layout = {}
-    payload_size = 0
+def validate_layout(variables):
+    """Sprawdza ręcznie podane offsety: zakres ładunku oraz brak nakładania się zmiennych."""
+    reserved = []  # (nazwa, offset, rozmiar)
 
     for variable in variables:
-        if CONF_BYTE_OFFSET not in variable:
-            continue
-
         name = variable[CONF_VAR_NAME]
         offset = variable[CONF_BYTE_OFFSET]
         size = get_type_size(variable[CONF_VAR_TYPE])
@@ -200,55 +191,13 @@ def calculate_layout(variables, alignment):
                 raise cv.Invalid(
                     f"Variables '{name}' and '{other_name}' occupy overlapping payload bytes"
                 )
-
         reserved.append((name, offset, size))
-        layout[name] = offset
-        payload_size = max(payload_size, offset + size)
-
-    cursor = 0
-    for variable in variables:
-        name = variable[CONF_VAR_NAME]
-        if name in layout:
-            continue
-
-        variable_type = variable[CONF_VAR_TYPE]
-        size = get_type_size(variable_type)
-        align = get_type_alignment(variable_type) if alignment else 1
-
-        while True:
-            remainder = cursor % align
-            if remainder:
-                cursor += align - remainder
-
-            collision = next(
-                (
-                    (other_offset, other_size)
-                    for _, other_offset, other_size in reserved
-                    if ranges_overlap(cursor, size, other_offset, other_size)
-                ),
-                None,
-            )
-            if collision is None:
-                break
-            cursor = collision[0] + collision[1]
-
-        if cursor + size > MAX_PAYLOAD_SIZE:
-            raise cv.Invalid(
-                f"Variable '{name}' exceeds the maximum payload size of {MAX_PAYLOAD_SIZE} bytes"
-            )
-
-        layout[name] = cursor
-        reserved.append((name, cursor, size))
-        payload_size = max(payload_size, cursor + size)
-        cursor += size
-
-    return layout, payload_size
 
 
 def validate_ip_address(value):
     try:
         return str(ipaddress.IPv4Address(cv.string(value)))
-    except ValueError as err:  # ipaddress.AddressValueError is a ValueError
+    except ValueError as err:  # ipaddress.AddressValueError dziedziczy po ValueError
         raise cv.Invalid("A valid IPv4 address is required") from err
 
 
@@ -260,7 +209,7 @@ def allowed_for_mapping(mapping_name, variable_type):
     if mapping_name == CONF_TEXT_SENSORS:
         return is_string_type(variable_type)
     if mapping_name == CONF_NUMBERS:
-        # a number written to a STRING variable is converted to text
+        # liczba zapisywana do zmiennej STRING jest zamieniana na tekst
         return variable_type in NUMERIC_TYPES or is_string_type(variable_type)
     return False
 
@@ -290,27 +239,19 @@ def validate_config(config):
             raise cv.Invalid(f"Duplicate variable name: {name}")
         names.add(name)
 
-        normalized = {
-            CONF_VAR_NAME: name,
-            CONF_VAR_TYPE: validate_variable_type(variable[CONF_VAR_TYPE]),
-        }
-        if CONF_BYTE_OFFSET in variable:
-            normalized[CONF_BYTE_OFFSET] = variable[CONF_BYTE_OFFSET]
-        elif direction == "read":
-            # offsets of decoded variables are manual, so unwanted variables can be skipped
-            raise cv.Invalid(
-                f"direction 'read' requires byte_offset for variable '{name}'"
-            )
-        normalized_variables.append(normalized)
+        normalized_variables.append(
+            {
+                CONF_VAR_NAME: name,
+                CONF_VAR_TYPE: validate_variable_type(variable[CONF_VAR_TYPE]),
+                CONF_BYTE_OFFSET: variable[CONF_BYTE_OFFSET],
+            }
+        )
 
-    # The layout is resolved here once; the C++ code only receives the final offsets.
-    layout, _payload_size = calculate_layout(normalized_variables, config[CONF_ALIGNMENT])
-    for variable in normalized_variables:
-        variable[CONF_BYTE_OFFSET] = layout[variable[CONF_VAR_NAME]]
+    validate_layout(normalized_variables)
     config[CONF_VARIABLES] = normalized_variables
 
-    # var_count is the number of variables on the sender's/receiver's list. It may exceed the number of
-    # variables defined here (skipped variables), but cannot be lower.
+    # var_count to liczba zmiennych na liście nadawcy/odbiorcy. Może być większa niż liczba
+    # zmiennych zdefiniowanych tutaj (pominięte zmienne), ale nie mniejsza.
     defined = len(normalized_variables)
     if config[CONF_VAR_COUNT] == 0:
         config[CONF_VAR_COUNT] = defined
@@ -358,13 +299,14 @@ def validate_config(config):
     if direction == "write" and read_entities:
         raise cv.Invalid("direction 'write' cannot contain sensors, binary_sensors or text_sensors")
 
-    # update_interval: 0s means "no cyclic transmission". ESPHome would call update() on every loop
-    # iteration for 0, so it is converted to "never".
+    # update_interval steruje wyłącznie cykliczną wysyłką, więc w trybie "read" jest zbędny.
+    # Wartość 0s oznacza "brak wysyłki cyklicznej"; ESPHome wywoływałby update() w każdej
+    # iteracji pętli, dlatego 0s jest zamieniane na "never".
     interval = config[CONF_UPDATE_INTERVAL]
-    if getattr(interval, "total_milliseconds", interval) == 0:
+    if direction == "read" or getattr(interval, "total_milliseconds", interval) == 0:
         config[CONF_UPDATE_INTERVAL] = SCHEDULER_DONT_RUN
 
-    # Statistics sensors are created automatically for every list; declaring one only customizes it.
+    # Sensory statystyk powstają automatycznie dla każdej listy; podanie ich w YAML tylko je dostosowuje.
     prefix = str(config[CONF_ID].id).replace("_", " ")
     for key, (_setter, suffix) in STATS_SENSORS.items():
         if key not in config:
@@ -374,16 +316,22 @@ def validate_config(config):
 
 
 def final_validate(config):
-    # A "read" list binds the UDP port, so two read lists cannot share one port.
+    # Listy "read" mogą współdzielić port UDP (jedno gniazdo, ramki rozdzielane według list_ID i IP nadawcy).
+    # Niedozwolone są tylko listy, których nie da się odróżnić: ten sam port, ten sam list_ID oraz
+    # ten sam adres nadawcy albo któryś z nich równy 0.0.0.0 (akceptuje dowolnego nadawcę).
     if config[CONF_DIRECTION] != "read":
         return config
     for other in fv.full_config.get().get(DOMAIN, []):
         if other[CONF_ID].id == config[CONF_ID].id or other[CONF_DIRECTION] != "read":
             continue
-        if other[CONF_PORT] == config[CONF_PORT]:
+        if other[CONF_PORT] != config[CONF_PORT] or other[CONF_LIST_ID] != config[CONF_LIST_ID]:
+            continue
+        ips = (config[CONF_IP_ADDRESS], other[CONF_IP_ADDRESS])
+        if ips[0] == ips[1] or "0.0.0.0" in ips:
             raise cv.Invalid(
-                f"Read lists '{config[CONF_ID].id}' and '{other[CONF_ID].id}' use the same UDP port "
-                f"{config[CONF_PORT]}; every read list needs its own port"
+                f"Read lists '{config[CONF_ID].id}' and '{other[CONF_ID].id}' share UDP port "
+                f"{config[CONF_PORT]} and list_id {config[CONF_LIST_ID]} and cannot be told apart; "
+                f"use a different list_id or a different (non-0.0.0.0) ip_address"
             )
     return config
 
@@ -397,7 +345,6 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_LIST_ID, default=1): cv.uint16_t,
             cv.Optional(CONF_VAR_COUNT, default=0): cv.uint16_t,
             cv.Optional(CONF_DIRECTION, default="write"): cv.one_of("read", "write", lower=True),
-            cv.Optional(CONF_ALIGNMENT, default=False): cv.boolean,
             cv.Optional(CONF_SEND_ON_CHANGE, default=False): cv.boolean,
             cv.Optional(
                 CONF_MIN_INTERVAL, default="500ms"
@@ -419,7 +366,7 @@ FINAL_VALIDATE_SCHEMA = final_validate
 
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
-    # register_component() also applies update_interval to the PollingComponent.
+    # register_component() ustawia także update_interval komponentu PollingComponent.
     await cg.register_component(var, config)
 
     cg.add(var.set_ip_address(config[CONF_IP_ADDRESS]))
@@ -427,7 +374,6 @@ async def to_code(config):
     cg.add(var.set_list_id(config[CONF_LIST_ID]))
     cg.add(var.set_var_count(config[CONF_VAR_COUNT]))
     cg.add(var.set_direction(config[CONF_DIRECTION]))
-    cg.add(var.set_alignment(config[CONF_ALIGNMENT]))
     cg.add(var.set_send_on_change(config[CONF_SEND_ON_CHANGE]))
     cg.add(var.set_min_interval(config[CONF_MIN_INTERVAL]))
 
