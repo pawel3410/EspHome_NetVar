@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace esphome {
@@ -24,23 +25,24 @@ static constexpr size_t NETVAR_MAX_PACKET_SIZE = 1472;
 static constexpr size_t NETVAR_MAX_PAYLOAD_SIZE = NETVAR_MAX_PACKET_SIZE - NETVAR_HEADER_SIZE;
 
 class WagoNetVarComponent;
+class PortReceiver;  // współdzielone gniazdo odbiorcze jednego portu UDP (definicja w pliku .cpp)
 
-/// Platform independent UDP transport (Arduino / ESP-IDF). Implementations live in the .cpp file,
-/// so no platform headers leak into the component header.
-/// IPv4 addresses are passed as host-order integers: a.b.c.d -> (a << 24) | (b << 16) | (c << 8) | d.
+/// Niezależny od platformy transport UDP (Arduino / ESP-IDF). Implementacje znajdują się w pliku .cpp,
+/// dzięki czemu nagłówki platformowe nie przedostają się do nagłówka komponentu.
+/// Adresy IPv4 są przekazywane jako liczby w kolejności hosta: a.b.c.d -> (a << 24) | (b << 16) | (c << 8) | d.
 class UdpTransport {
  public:
   virtual ~UdpTransport() = default;
 
-  /// Opens the socket. port == 0 means "send only" (no fixed local port is bound).
+  /// Otwiera gniazdo. port == 0 oznacza tryb "tylko wysyłanie" (bez stałego portu lokalnego).
   virtual bool begin(uint16_t port) = 0;
 
-  /// Non-blocking receive of one datagram.
-  /// Returns the datagram length (> capacity means the datagram is too large and `buffer` is invalid),
-  /// 0 when nothing is pending, or a negative value on a socket error.
+  /// Nieblokujący odbiór jednego datagramu.
+  /// Zwraca długość datagramu (> capacity oznacza zbyt duży datagram, a `buffer` jest nieprawidłowy),
+  /// 0 gdy nic nie czeka albo wartość ujemną przy błędzie gniazda.
   virtual int receive(uint8_t *buffer, size_t capacity, uint32_t &remote_ip, uint16_t &remote_port) = 0;
 
-  /// Sends one datagram. Returns true on success.
+  /// Wysyła jeden datagram. Zwraca true przy powodzeniu.
   virtual bool send(uint32_t ip, uint16_t port, const uint8_t *data, size_t length) = 0;
 };
 
@@ -96,7 +98,7 @@ struct VarDef {
   std::string type_name;
   VariableType type{VariableType::BOOL};
   size_t size{0};
-  size_t byte_offset{0};  // resolved at compile time by the Python code generator
+  size_t byte_offset{0};  // podawany ręcznie w YAML, zwalidowany przez kod Pythona
 
   sensor::Sensor *sensor_ptr{nullptr};
   binary_sensor::BinarySensor *binary_sensor_ptr{nullptr};
@@ -105,20 +107,21 @@ struct VarDef {
   number::Number *number_ptr{nullptr};
 };
 
-/// update_interval (PollingComponent) drives the cyclic transmission in "write" mode.
-/// update_interval: never (also "0s", converted by the Python validator) disables it.
+/// update_interval (PollingComponent) steruje cykliczną wysyłką w trybie "write".
+/// update_interval: never (także "0s", zamieniane przez walidator Pythona) wyłącza ją.
 class WagoNetVarComponent : public PollingComponent {
+  friend class PortReceiver;  // PortReceiver rozdziela odebrane ramki między listy "read" tego samego portu
+
  public:
-  // ---- configuration (called from generated code) ----
+  // ---- konfiguracja (wywoływana z wygenerowanego kodu) ----
   void set_ip_address(const std::string &ip) { this->ip_address_ = ip; }
   void set_port(uint16_t port) { this->port_ = port; }
   void set_list_id(uint16_t list_id) { this->list_id_ = list_id; }
   void set_var_count(uint16_t var_count) { this->var_count_ = var_count; }
   void set_direction(const std::string &direction) {
     this->enable_read_ = (direction == "read");
-    this->enable_write_ = (direction == "write");
+    this->enable_write_ = !this->enable_read_;
   }
-  void set_alignment(bool alignment) { this->alignment_ = alignment; }
   void set_send_on_change(bool enable) { this->send_on_change_ = enable; }
   void set_min_interval(uint32_t ms) { this->min_interval_ms_ = ms; }
 
@@ -136,19 +139,30 @@ class WagoNetVarComponent : public PollingComponent {
   void set_rx_errors_sensor(sensor::Sensor *sensor) { this->rx_errors_sensor_ = sensor; }
   void set_tx_errors_sensor(sensor::Sensor *sensor) { this->tx_errors_sensor_ = sensor; }
 
-  // ---- runtime API (usable from lambdas, switches and numbers); "write" lists only ----
-  // Values are converted to the NetVar type of the variable. On integer overflow the least significant
-  // bytes are kept. Numbers written to a STRING variable are converted to text.
+  // ---- API czasu działania (lambdy, switch, number); tylko listy "write" ----
+  // Wartość jest konwertowana na typ NetVar zmiennej. Przy przepełnieniu typu całkowitego zachowywane są
+  // najmniej znaczące bajty. Liczby zapisywane do zmiennej STRING są zamieniane na tekst.
   void set_variable_value(const std::string &name, bool value);
-  void set_variable_value(const std::string &name, int value);
-  void set_variable_value(const std::string &name, float value);
   void set_variable_value(const std::string &name, const std::string &value);
-  // Without this overload a string literal would silently select the bool overload.
+  // Bez tego przeciążenia literał tekstowy wybrałby przeciążenie bool.
   void set_variable_value(const std::string &name, const char *value) {
     this->set_variable_value(name, std::string(value));
   }
+  /// Dowolny typ arytmetyczny (int, uint32_t, float, double, ...). Zwykły zestaw przeciążeń bool/int/float
+  /// powodowałby niejednoznaczność przy wywołaniu np. z double lub uint32_t.
+  template<typename T, typename = typename std::enable_if<std::is_arithmetic<T>::value &&
+                                                          !std::is_same<T, bool>::value>::type>
+  void set_variable_value(const std::string &name, T value) {
+    VarDef *var = this->prepare_write_(name);
+    if (var == nullptr)
+      return;
+    if (std::is_floating_point<T>::value)
+      this->write_double_(*var, static_cast<double>(value));
+    else
+      this->write_int64_(*var, static_cast<int64_t>(value));
+  }
 
-  /// Last value of a variable (sent value in "write" mode, last decoded value in "read" mode).
+  /// Ostatnia wartość zmiennej (wysłana w trybie "write", ostatnio zdekodowana w trybie "read").
   std::string get_variable_value(const std::string &name) const;
 
   // ---- Component ----
@@ -161,16 +175,17 @@ class WagoNetVarComponent : public PollingComponent {
  protected:
   static constexpr size_t STATS_COUNT = 5;
 
-  // helpers: configuration
+  // pomocnicze: konfiguracja
   VarDef *get_var(const std::string &name);
   const VarDef *get_var(const std::string &name) const;
   void fail_config_(const char *what, const std::string &name);
   bool finalize_layout_();
 
-  // helpers: transport
+  // pomocnicze: transport
   bool ensure_udp_();
-  void receive_packets_();
-  bool validate_packet_(size_t packet_size, uint32_t remote_ip);
+  /// Waliduje ramkę i, jeśli jest poprawna, dekoduje ją i zlicza (rx_packets). Zwraca true, gdy ramka została przyjęta.
+  bool accept_frame_(const uint8_t *frame, size_t packet_size, uint32_t remote_ip);
+  bool validate_packet_(const uint8_t *frame, size_t packet_size, uint32_t remote_ip) const;
   void unpack_payload_(const uint8_t *payload);
   void publish_variable_(const VarDef &var);
   void publish_statistics_();
@@ -178,7 +193,7 @@ class WagoNetVarComponent : public PollingComponent {
   void trigger_send_();
   void send_packet_();
 
-  // helpers: value conversion
+  // pomocnicze: konwersja wartości
   VarDef *prepare_write_(const std::string &name);
   void commit_(const VarDef &var, const uint8_t *bytes);
   void write_int64_(VarDef &var, int64_t value);
@@ -186,7 +201,7 @@ class WagoNetVarComponent : public PollingComponent {
   void write_text_(VarDef &var, const std::string &text);
   double decode_number_(const VarDef &var, const uint8_t *data) const;
 
-  // configuration
+  // konfiguracja
   std::string ip_address_;
   uint32_t ip_{0};
   uint16_t port_{1202};
@@ -194,17 +209,17 @@ class WagoNetVarComponent : public PollingComponent {
   uint16_t var_count_{0};
   bool enable_read_{false};
   bool enable_write_{true};
-  bool alignment_{false};
   bool send_on_change_{false};
   uint32_t min_interval_ms_{500};
   bool config_error_{false};
 
-  // state
+  // stan
   std::vector<VarDef> variables_;
   size_t payload_size_{0};
-  std::vector<uint8_t> payload_;  // current variable values
-  std::vector<uint8_t> frame_;    // scratch buffer: RX datagram (read) or TX frame (write)
-  std::unique_ptr<UdpTransport> udp_;
+  std::vector<uint8_t> payload_;  // bieżące wartości zmiennych
+  std::vector<uint8_t> frame_;    // bufor ramki TX (tylko tryb write)
+  std::unique_ptr<UdpTransport> udp_;  // gniazdo wysyłające (tylko tryb write)
+  PortReceiver *receiver_{nullptr};    // współdzielone gniazdo odbiorcze portu (tylko tryb read)
   bool udp_started_{false};
   bool udp_attempted_{false};
   uint32_t last_udp_attempt_{0};
