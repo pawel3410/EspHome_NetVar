@@ -278,6 +278,108 @@ std::string format_integer(int64_t value) {
   return buffer;
 }
 
+// Odczyt tekstu STRING: do pierwszego bajtu 0x00 (lub max_size). NetVar STRING to wyłącznie ASCII,
+// więc bajty spoza ASCII (>127) są zamieniane na '?', aby publikowany tekst zawsze był poprawny.
+std::string read_ascii_string(const uint8_t *data, size_t max_size) {
+  std::string text;
+  for (size_t i = 0; i < max_size && data[i] != '\0'; ++i)
+    text.push_back(data[i] < 128 ? static_cast<char>(data[i]) : '?');
+  return text;
+}
+
+// Liczba zapisywana do zmiennej STRING: wartości całkowite bez części ułamkowej i wykładnika
+// (np. "1000000", a nie "1e+06"), pozostałe z dokładnością do 7 cyfr znaczących.
+std::string format_decimal(double value) {
+  char buffer[32];
+  if (value == 0.0)
+    return "0";
+  if (value == std::floor(value) && std::fabs(value) < 1e15)
+    std::snprintf(buffer, sizeof(buffer), "%.0f", value);
+  else
+    std::snprintf(buffer, sizeof(buffer), "%.7g", value);
+  return buffer;
+}
+
+inline bool is_temporal_type(VariableType type) {
+  return type == VariableType::TIME || type == VariableType::DATE || type == VariableType::TIME_OF_DAY ||
+         type == VariableType::DATE_AND_TIME;
+}
+
+// Data cywilna z liczby dni od 1970-01-01 (algorytm Howarda Hinnanta).
+void civil_from_days(int64_t days, int &year, unsigned &month, unsigned &day) {
+  days += 719468;
+  const int64_t era = (days >= 0 ? days : days - 146096) / 146097;
+  const unsigned day_of_era = static_cast<unsigned>(days - era * 146097);
+  const unsigned year_of_era =
+      (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
+  const unsigned day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+  const unsigned mp = (5 * day_of_year + 2) / 153;
+  day = day_of_year - (153 * mp + 2) / 5 + 1;
+  month = mp < 10 ? mp + 3 : mp - 9;
+  year = static_cast<int>(year_of_era) + static_cast<int>(era) * 400 + (month <= 2 ? 1 : 0);
+}
+
+// Tekst IEC dla typów czasowych (identyczny jak w integracji Home Assistant):
+// TIME: T#1d2h3m4s500ms (części zerowe pomijane, zero to T#0ms), DATE: D#2026-11-08,
+// DATE_AND_TIME: DT#2026-11-08-12:34:56, TIME_OF_DAY: TOD#12:34:56 albo TOD#12:34:56.789.
+// DATE i DATE_AND_TIME to sekundy od 1970-01-01 bez przeliczania strefy czasowej.
+std::string format_temporal(VariableType type, uint32_t raw) {
+  char buffer[48];
+  if (type == VariableType::TIME) {
+    const uint32_t days = raw / 86400000u;
+    uint32_t rest = raw % 86400000u;
+    const uint32_t hours = rest / 3600000u;
+    rest %= 3600000u;
+    const uint32_t minutes = rest / 60000u;
+    rest %= 60000u;
+    const uint32_t seconds = rest / 1000u;
+    const uint32_t millis_part = rest % 1000u;
+    std::string text = "T#";
+    const struct {
+      uint32_t value;
+      const char *unit;
+    } parts[] = {{days, "d"}, {hours, "h"}, {minutes, "m"}, {seconds, "s"}, {millis_part, "ms"}};
+    for (const auto &part : parts) {
+      if (part.value != 0)
+        text += std::to_string(part.value) + part.unit;
+    }
+    return text.size() == 2 ? "T#0ms" : text;
+  }
+  if (type == VariableType::TIME_OF_DAY) {
+    const uint32_t hours = raw / 3600000u;
+    const uint32_t minutes = (raw % 3600000u) / 60000u;
+    const uint32_t seconds = (raw % 60000u) / 1000u;
+    const uint32_t millis_part = raw % 1000u;
+    if (millis_part != 0)
+      std::snprintf(buffer, sizeof(buffer), "TOD#%02u:%02u:%02u.%03u", static_cast<unsigned>(hours),
+                    static_cast<unsigned>(minutes), static_cast<unsigned>(seconds), static_cast<unsigned>(millis_part));
+    else
+      std::snprintf(buffer, sizeof(buffer), "TOD#%02u:%02u:%02u", static_cast<unsigned>(hours),
+                    static_cast<unsigned>(minutes), static_cast<unsigned>(seconds));
+    return buffer;
+  }
+  int year = 1970;
+  unsigned month = 1, day = 1;
+  civil_from_days(raw / 86400u, year, month, day);
+  if (type == VariableType::DATE) {
+    std::snprintf(buffer, sizeof(buffer), "D#%04d-%02u-%02u", year, month, day);
+  } else {
+    const uint32_t seconds_of_day = raw % 86400u;
+    std::snprintf(buffer, sizeof(buffer), "DT#%04d-%02u-%02u-%02u:%02u:%02u", year, month, day,
+                  static_cast<unsigned>(seconds_of_day / 3600u), static_cast<unsigned>((seconds_of_day % 3600u) / 60u),
+                  static_cast<unsigned>(seconds_of_day % 60u));
+  }
+  return buffer;
+}
+
+// Przeniesienie encji w stan "unknown" (timeout odbioru). Nie każda wersja ESPHome ma invalidate_state()
+// dla wszystkich rodzajów encji, dlatego wywołanie jest wybierane w czasie kompilacji (SFINAE).
+template<typename T> auto invalidate_entity(T *entity, int) -> decltype(entity->invalidate_state(), void()) {
+  if (entity != nullptr)
+    entity->invalidate_state();
+}
+template<typename T> void invalidate_entity(T *, long) {}
+
 std::string to_lower(std::string text) {
   for (auto &c : text)
     c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -310,6 +412,7 @@ void WagoSwitch::write_state(bool state) {
   if (this->parent_ == nullptr)
     return;
   this->parent_->set_variable_value(this->var_name_, state);
+  this->parent_->save_restore_value(this->var_name_, state ? 1.0f : 0.0f);
   this->publish_state(state);
 }
 
@@ -317,6 +420,7 @@ void WagoNumber::control(float value) {
   if (this->parent_ == nullptr)
     return;
   this->parent_->set_variable_value(this->var_name_, value);
+  this->parent_->save_restore_value(this->var_name_, value);
   this->publish_state(value);
 }
 
@@ -459,7 +563,8 @@ const VarDef *WagoNetVarComponent::get_var(const std::string &name) const {
   return nullptr;
 }
 
-void WagoNetVarComponent::add_variable(const std::string &name, const std::string &type, uint16_t byte_offset) {
+void WagoNetVarComponent::add_variable(const std::string &name, const std::string &type, uint16_t byte_offset,
+                                       uint16_t index, bool require_value) {
   if (name.empty()) {
     this->fail_config_("variable name cannot be empty", name);
     return;
@@ -473,6 +578,8 @@ void WagoNetVarComponent::add_variable(const std::string &name, const std::strin
   var.name = name;
   var.type_name = type;
   var.byte_offset = byte_offset;
+  var.index = index;
+  var.require_value = require_value;
   if (!parse_type(type, var.type, var.size)) {
     this->fail_config_("unsupported variable type", name + ": " + type);
     return;
@@ -508,7 +615,8 @@ void WagoNetVarComponent::register_binary_sensor(const std::string &name, binary
 
 void WagoNetVarComponent::register_text_sensor(const std::string &name, text_sensor::TextSensor *entity) {
   VarDef *var = this->get_var(name);
-  if (var == nullptr || entity == nullptr || var->type != VariableType::STRING) {
+  // STRING albo typ czasowy (tekst IEC)
+  if (var == nullptr || entity == nullptr || (var->type != VariableType::STRING && !is_temporal_type(var->type))) {
     this->fail_config_("invalid text sensor mapping", name);
     return;
   }
@@ -519,7 +627,8 @@ void WagoNetVarComponent::register_text_sensor(const std::string &name, text_sen
   var->text_sensor_ptr = entity;
 }
 
-void WagoNetVarComponent::register_switch(const std::string &name, switch_::Switch *entity) {
+void WagoNetVarComponent::register_switch(const std::string &name, switch_::Switch *entity, bool restore_value,
+                                          bool has_initial, bool initial_value) {
   VarDef *var = this->get_var(name);
   if (var == nullptr || entity == nullptr || var->type != VariableType::BOOL) {
     this->fail_config_("invalid switch mapping", name);
@@ -530,10 +639,14 @@ void WagoNetVarComponent::register_switch(const std::string &name, switch_::Swit
     return;
   }
   var->switch_ptr = entity;
+  var->restore_value = restore_value;
+  var->has_initial = has_initial;
+  var->initial_value = initial_value ? 1.0 : 0.0;
 }
 
 // Number może sterować dowolną zmienną liczbową, a także STRING (liczba jest zapisywana jako tekst).
-void WagoNetVarComponent::register_number(const std::string &name, number::Number *entity) {
+void WagoNetVarComponent::register_number(const std::string &name, number::Number *entity, bool restore_value,
+                                          bool has_initial, float initial_value) {
   VarDef *var = this->get_var(name);
   if (var == nullptr || entity == nullptr || var->type == VariableType::BOOL) {
     this->fail_config_("invalid number mapping", name);
@@ -544,6 +657,9 @@ void WagoNetVarComponent::register_number(const std::string &name, number::Numbe
     return;
   }
   var->number_ptr = entity;
+  var->restore_value = restore_value;
+  var->has_initial = has_initial;
+  var->initial_value = initial_value;
 }
 
 // Offsety są walidowane przez kod Pythona; tutaj tylko je sprawdzamy (zabezpieczenie dodatkowe)
@@ -566,6 +682,25 @@ bool WagoNetVarComponent::finalize_layout_() {
       }
     }
     payload_size = std::max(payload_size, end);
+    if (!this->pack_variables_) {
+      for (size_t j = 0; j < i; ++j) {
+        if (this->variables_[j].index == var.index) {
+          ESP_LOGE(TAG, "Variables '%s' and '%s' have the same index %u", var.name.c_str(),
+                   this->variables_[j].name.c_str(), static_cast<unsigned>(var.index));
+          return false;
+        }
+      }
+    }
+  }
+  // Lista pakowana: jawny payload_size oznacza dokładny rozmiar ładunku (odbiór nie akceptuje dłuższych ramek).
+  if (this->pack_variables_ && this->configured_payload_size_ > 0) {
+    if (this->configured_payload_size_ < payload_size || this->configured_payload_size_ > NETVAR_MAX_PAYLOAD_SIZE) {
+      ESP_LOGE(TAG, "payload_size (%u) is lower than the size resulting from variable offsets (%u) or too large",
+               static_cast<unsigned>(this->configured_payload_size_), static_cast<unsigned>(payload_size));
+      return false;
+    }
+    payload_size = this->configured_payload_size_;
+    this->exact_payload_size_ = true;
   }
   this->payload_size_ = payload_size;
   return true;
@@ -583,11 +718,11 @@ void WagoNetVarComponent::setup() {
     return;
   }
 
-  // var_count to liczba zmiennych na liście nadawcy. Może być większa niż liczba zmiennych
-  // zdefiniowanych tutaj (zmienne pomijane), ale nigdy mniejsza.
+  // var_count to liczba zmiennych na liście nadawcy (lista pakowana). Może być większa niż liczba zmiennych
+  // zdefiniowanych tutaj (zmienne pomijane), ale nigdy mniejsza. W liście niepakowanej każda ramka ma var_count = 1.
   if (this->var_count_ == 0)
     this->var_count_ = static_cast<uint16_t>(this->variables_.size());
-  if (this->var_count_ < this->variables_.size()) {
+  if (this->pack_variables_ && this->var_count_ < this->variables_.size()) {
     ESP_LOGE(TAG, "var_count (%u) is lower than the number of defined variables (%u)",
              static_cast<unsigned>(this->var_count_), static_cast<unsigned>(this->variables_.size()));
     this->mark_failed();
@@ -614,8 +749,15 @@ void WagoNetVarComponent::setup() {
     this->receiver_ = PortReceiver::get(this->port_);
     this->receiver_->add_listener(this);
   } else {
-    this->frame_.assign(NETVAR_HEADER_SIZE + this->payload_size_, 0);
+    size_t frame_payload = this->payload_size_;
+    if (!this->pack_variables_) {
+      frame_payload = 0;  // każda ramka niesie jedną zmienną
+      for (const auto &var : this->variables_)
+        frame_payload = std::max(frame_payload, var.size);
+    }
+    this->frame_.assign(NETVAR_HEADER_SIZE + frame_payload, 0);
     this->udp_ = create_transport();
+    this->apply_startup_values_();  // initial_value i restore_value; wysyłka po otwarciu gniazda w loop()
     // Gniazdo wysyłające jest otwierane w loop() (patrz ensure_udp_()).
   }
 }
@@ -652,10 +794,18 @@ void WagoNetVarComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  IP address: %s", this->ip_address_.c_str());
   ESP_LOGCONFIG(TAG, "  Port: %u%s", static_cast<unsigned>(this->port_), this->enable_read_ ? " (shared by read lists)" : "");
   ESP_LOGCONFIG(TAG, "  List ID: %u", static_cast<unsigned>(this->list_id_));
-  ESP_LOGCONFIG(TAG, "  Variable count: %u", static_cast<unsigned>(this->var_count_));
-  ESP_LOGCONFIG(TAG, "  Payload size: %u bytes", static_cast<unsigned>(this->payload_size_));
+  ESP_LOGCONFIG(TAG, "  Pack variables: %s", this->pack_variables_ ? "yes" : "no (one frame per variable)");
+  if (this->pack_variables_) {
+    ESP_LOGCONFIG(TAG, "  Variable count: %u", static_cast<unsigned>(this->var_count_));
+    ESP_LOGCONFIG(TAG, "  Payload size: %u bytes%s", static_cast<unsigned>(this->payload_size_),
+                  this->exact_payload_size_ ? " (exact)" : "");
+  }
+  if (this->enable_read_ && this->timeout_ms_ > 0)
+    ESP_LOGCONFIG(TAG, "  Timeout: %u ms", static_cast<unsigned>(this->timeout_ms_));
+  if (this->enable_write_ && this->pack_variables_)
+    ESP_LOGCONFIG(TAG, "  Require values: %s", this->require_values_ ? "yes" : "no");
   if (this->enable_write_) {
-    ESP_LOGCONFIG(TAG, "  Send on change: %s", this->send_on_change_ ? "yes" : "no");
+    ESP_LOGCONFIG(TAG, "  On change: %s", this->send_on_change_ ? "yes" : "no");
     if (this->send_on_change_)
       ESP_LOGCONFIG(TAG, "  Min interval: %u ms", static_cast<unsigned>(this->min_interval_ms_));
     LOG_UPDATE_INTERVAL(this);
@@ -663,6 +813,11 @@ void WagoNetVarComponent::dump_config() {
   for (const auto &var : this->variables_) {
     ESP_LOGCONFIG(TAG, "  Variable '%s': type=%s offset=%u size=%u", var.name.c_str(), var.type_name.c_str(),
                   static_cast<unsigned>(var.byte_offset), static_cast<unsigned>(var.size));
+    if (!this->pack_variables_)
+      ESP_LOGCONFIG(TAG, "    Index: %u%s", static_cast<unsigned>(var.index), var.require_value ? " (require value)" : "");
+    if (var.restore_value || var.has_initial)
+      ESP_LOGCONFIG(TAG, "    Restore value: %s, initial value: %s", var.restore_value ? "yes" : "no",
+                    var.has_initial ? "set" : "none");
     LOG_SENSOR("    ", "Sensor", var.sensor_ptr);
     LOG_BINARY_SENSOR("    ", "Binary sensor", var.binary_sensor_ptr);
     LOG_TEXT_SENSOR("    ", "Text sensor", var.text_sensor_ptr);
@@ -689,6 +844,7 @@ void WagoNetVarComponent::loop() {
 
   if (this->enable_read_) {
     this->receiver_->poll();  // odbiera i rozdziela ramki także do pozostałych list tego portu
+    this->check_timeouts_();
     return;
   }
 
@@ -696,11 +852,33 @@ void WagoNetVarComponent::loop() {
     this->trigger_send_();
 }
 
+const VarDef *WagoNetVarComponent::find_by_index_(uint16_t index) const {
+  for (const auto &var : this->variables_) {
+    if (var.index == index)
+      return &var;
+  }
+  return nullptr;
+}
+
 bool WagoNetVarComponent::accept_frame_(const uint8_t *frame, size_t packet_size, uint32_t remote_ip) {
   if (!this->validate_packet_(frame, packet_size, remote_ip))
     return false;
   ++this->rx_packets_;
-  this->unpack_payload_(frame + NETVAR_HEADER_SIZE);
+
+  const uint8_t *payload = frame + NETVAR_HEADER_SIZE;
+  if (this->pack_variables_) {
+    this->unpack_payload_(payload);
+    return true;
+  }
+
+  // Lista niepakowana: ramka niesie jedną zmienną. Ramka zmiennej, której nie odczytujemy, jest poprawna,
+  // ale pomijana (liczy się do rx_packets).
+  auto *var = const_cast<VarDef *>(this->find_by_index_(read_u16(&frame[10])));
+  if (var != nullptr) {
+    std::memcpy(this->payload_.data() + var->byte_offset, payload, var->size);
+    this->mark_received_(*var);
+    this->publish_variable_(*var);
+  }
   return true;
 }
 
@@ -719,15 +897,27 @@ bool WagoNetVarComponent::validate_packet_(const uint8_t *header, size_t packet_
 
   if (read_u16(&header[8]) != this->list_id_)
     return false;
-  if (read_u16(&header[12]) != this->var_count_)
-    return false;
   if (read_u16(&header[14]) != packet_size)  // frame_size musi zgadzać się z rozmiarem odebranego datagramu
     return false;
 
-  // Ramka musi obejmować wszystkie zdefiniowane zmienne. Może być dłuższa: zmienne za ostatnią
-  // zdefiniowaną są po prostu pomijane.
-  if (packet_size - NETVAR_HEADER_SIZE < this->payload_size_)
-    return false;
+  const size_t payload_length = packet_size - NETVAR_HEADER_SIZE;
+  const uint16_t var_index = read_u16(&header[10]);
+  const uint16_t var_count = read_u16(&header[12]);
+
+  if (this->pack_variables_) {
+    if (var_index != 0 || var_count != this->var_count_)
+      return false;
+    // Ramka musi obejmować wszystkie zdefiniowane zmienne. Bez jawnego payload_size może być dłuższa:
+    // zmienne za ostatnią zdefiniowaną są po prostu pomijane.
+    if (this->exact_payload_size_ ? payload_length != this->payload_size_ : payload_length < this->payload_size_)
+      return false;
+  } else {
+    if (var_count != 1)
+      return false;
+    const VarDef *var = this->find_by_index_(var_index);
+    if (var != nullptr && payload_length != var->size)
+      return false;
+  }
 
   ESP_LOGV(TAG, "List %u: frame ok, sequence counter %u, flags 0x%02X, checksum 0x%02X",
            static_cast<unsigned>(this->list_id_), static_cast<unsigned>(read_u16(&header[16])),
@@ -737,8 +927,42 @@ bool WagoNetVarComponent::validate_packet_(const uint8_t *header, size_t packet_
 
 void WagoNetVarComponent::unpack_payload_(const uint8_t *payload) {
   std::memcpy(this->payload_.data(), payload, this->payload_size_);
-  for (const auto &var : this->variables_)
+  for (auto &var : this->variables_) {
+    this->mark_received_(var);
     this->publish_variable_(var);
+  }
+}
+
+void WagoNetVarComponent::mark_received_(VarDef &var) {
+  var.received = true;
+  var.last_received = millis();
+  if (var.expired) {
+    var.expired = false;
+    ESP_LOGI(TAG, "List %u: variable '%s' receives data again", static_cast<unsigned>(this->list_id_),
+             var.name.c_str());
+  }
+}
+
+// Watchdog odbioru: po timeout bez ramki encje zmiennej przechodzą w stan "unknown" (jednorazowo).
+void WagoNetVarComponent::check_timeouts_() {
+  if (this->timeout_ms_ == 0)
+    return;
+  const uint32_t now = millis();
+  for (auto &var : this->variables_) {
+    if (!var.received || var.expired || now - var.last_received <= this->timeout_ms_)
+      continue;
+    var.expired = true;
+    ESP_LOGW(TAG, "List %u: no data for variable '%s' within %u ms", static_cast<unsigned>(this->list_id_),
+             var.name.c_str(), static_cast<unsigned>(this->timeout_ms_));
+    this->invalidate_variable_(var);
+  }
+}
+
+void WagoNetVarComponent::invalidate_variable_(const VarDef &var) {
+  if (var.sensor_ptr != nullptr)
+    var.sensor_ptr->publish_state(NAN);  // NaN to "unknown" w ESPHome
+  invalidate_entity(var.binary_sensor_ptr, 0);
+  invalidate_entity(var.text_sensor_ptr, 0);
 }
 
 double WagoNetVarComponent::decode_number_(const VarDef &var, const uint8_t *data) const {
@@ -770,14 +994,14 @@ void WagoNetVarComponent::publish_variable_(const VarDef &var) {
   }
 
   if (var.type == VariableType::STRING) {
-    if (var.text_sensor_ptr != nullptr) {
-      size_t length = 0;
-      while (length < var.size && data[length] != '\0')
-        ++length;
-      var.text_sensor_ptr->publish_state(std::string(reinterpret_cast<const char *>(data), length));
-    }
+    if (var.text_sensor_ptr != nullptr)
+      var.text_sensor_ptr->publish_state(read_ascii_string(data, var.size));
     return;
   }
+
+  // Typy czasowe: text_sensor pokazuje tekst IEC, sensor surową liczbę.
+  if (var.text_sensor_ptr != nullptr && is_temporal_type(var.type))
+    var.text_sensor_ptr->publish_state(format_temporal(var.type, load_le(data, var.size)));
 
   if (var.sensor_ptr == nullptr)
     return;
@@ -811,32 +1035,73 @@ void WagoNetVarComponent::trigger_send_() {
     this->send_packet_();
 }
 
+bool WagoNetVarComponent::all_values_set_() const {
+  for (const auto &var : this->variables_) {
+    if (!var.has_value)
+      return false;
+  }
+  return true;
+}
+
+void WagoNetVarComponent::send_now() {
+  if (this->enable_write_)
+    this->send_packet_();
+}
+
+// Wysyła jedną ramkę: lista pakowana (var_index 0, var_count z konfiguracji, cały ładunek) albo jedna zmienna
+// listy niepakowanej (var_index zmiennej, var_count 1). Pola flag i checksum pozostają 0.
+bool WagoNetVarComponent::send_frame_(uint16_t var_index, uint16_t var_count, const uint8_t *data, size_t size) {
+  const size_t total_length = NETVAR_HEADER_SIZE + size;
+  uint8_t *frame = this->frame_.data();
+
+  std::memset(frame, 0, NETVAR_HEADER_SIZE);
+  std::memcpy(frame, MAGIC_BYTES, sizeof(MAGIC_BYTES));
+  write_u16(&frame[8], this->list_id_);
+  write_u16(&frame[10], var_index);
+  write_u16(&frame[12], var_count);
+  write_u16(&frame[14], static_cast<uint16_t>(total_length));
+  write_u16(&frame[16], this->sequence_counter_);
+  std::memcpy(frame + NETVAR_HEADER_SIZE, data, size);
+
+  if (!this->udp_->send(this->ip_, this->port_, frame, total_length)) {
+    ++this->tx_errors_;
+    return false;
+  }
+  ++this->tx_packets_;
+  ++this->sequence_counter_;
+  return true;
+}
+
 void WagoNetVarComponent::send_packet_() {
   if (!this->enable_write_ || !this->udp_started_ || this->payload_size_ == 0)
     return;
 
-  const size_t total_length = NETVAR_HEADER_SIZE + this->payload_size_;
-  uint8_t *frame = this->frame_.data();
-
-  std::memset(frame, 0, NETVAR_HEADER_SIZE);  // pola zarezerwowane, var_index, flagi i checksum pozostają 0
-  std::memcpy(frame, MAGIC_BYTES, sizeof(MAGIC_BYTES));
-  write_u16(&frame[8], this->list_id_);
-  write_u16(&frame[12], this->var_count_);
-  write_u16(&frame[14], static_cast<uint16_t>(total_length));
-  write_u16(&frame[16], this->sequence_counter_);
-  std::memcpy(frame + NETVAR_HEADER_SIZE, this->payload_.data(), this->payload_size_);
+  bool ok = true;
+  if (this->pack_variables_) {
+    // require_values: lista nie jest wysyłana, dopóki każda zmienna nie ma wartości.
+    if (this->require_values_ && !this->all_values_set_()) {
+      if (!this->gate_warned_) {
+        ESP_LOGW(TAG, "List %u: not sent, some variables have no value yet", static_cast<unsigned>(this->list_id_));
+        this->gate_warned_ = true;
+      }
+      return;
+    }
+    this->gate_warned_ = false;
+    ok = this->send_frame_(0, this->var_count_, this->payload_.data(), this->payload_size_);
+  } else {
+    // Lista niepakowana: każda zmienna w osobnej ramce; zmienne z require_value bez wartości są pomijane.
+    for (const auto &var : this->variables_) {
+      if (var.require_value && !var.has_value)
+        continue;
+      if (!this->send_frame_(var.index, 1, this->payload_.data() + var.byte_offset, var.size))
+        ok = false;
+    }
+  }
 
   // Ustawiane także przy błędzie, aby nieudana wysyłka była ponawiana najwyżej raz na min_interval.
   this->last_sent_time_ = millis();
-
-  if (!this->udp_->send(this->ip_, this->port_, frame, total_length)) {
-    ++this->tx_errors_;
-    return;
-  }
-
-  ++this->tx_packets_;
-  ++this->sequence_counter_;
-  this->is_dirty_ = false;
+  if (ok)
+    this->is_dirty_ = false;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -856,10 +1121,18 @@ VarDef *WagoNetVarComponent::prepare_write_(const std::string &name) {
   return var;
 }
 
-void WagoNetVarComponent::commit_(const VarDef &var, const uint8_t *bytes) {
+void WagoNetVarComponent::commit_(VarDef &var, const uint8_t *bytes) {
+  // Pierwsze ustawienie zmiennej (nawet na wartość równą zeru w buforze) oznacza, że zmienna ma wartość;
+  // przy on_change wymusza to wysyłkę, bo mogła na nią czekać blokada require_value(s).
+  const bool first_value = !var.has_value;
+  var.has_value = true;
+
   uint8_t *destination = this->payload_.data() + var.byte_offset;
-  if (std::memcmp(destination, bytes, var.size) == 0)
+  if (std::memcmp(destination, bytes, var.size) == 0) {
+    if (first_value && this->send_on_change_)
+      this->is_dirty_ = true;
     return;
+  }
   std::memcpy(destination, bytes, var.size);
 
   // Tylko oznaczamy zmianę; faktyczna wysyłka następuje w loop(). Dzięki temu kilka zmian wykonanych
@@ -902,7 +1175,7 @@ void WagoNetVarComponent::write_double_(VarDef &var, double value) {
       this->write_int64_(var, value != 0.0 ? 1 : 0);
       return;
     case VariableType::STRING:
-      this->write_text_(var, format_number(value, true));
+      this->write_text_(var, format_decimal(value));
       return;
     case VariableType::REAL: {
       if (std::fabs(value) > FLT_MAX) {
@@ -1006,15 +1279,51 @@ std::string WagoNetVarComponent::get_variable_value(const std::string &name) con
   switch (var->type) {
     case VariableType::BOOL:
       return data[0] != 0 ? "1" : "0";
-    case VariableType::STRING: {
-      size_t length = 0;
-      while (length < var->size && data[length] != '\0')
-        ++length;
-      return std::string(reinterpret_cast<const char *>(data), length);
-    }
+    case VariableType::STRING:
+      return read_ascii_string(data, var->size);
     default:
       return format_number(this->decode_number_(*var, data), var->type == VariableType::REAL);
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Wartości początkowe i przywracanie
+// ---------------------------------------------------------------------------------------------
+
+void WagoNetVarComponent::apply_value_(VarDef &var, double value) {
+  if (var.switch_ptr != nullptr) {
+    this->write_int64_(var, value != 0.0 ? 1 : 0);
+    var.switch_ptr->publish_state(value != 0.0);
+  } else if (var.number_ptr != nullptr) {
+    this->write_double_(var, value);
+    var.number_ptr->publish_state(static_cast<float>(value));
+  }
+}
+
+// Kolejność: wartość przywrócona z pamięci (restore_value), a gdy jej brak - initial_value. Zmienna bez żadnej
+// z nich nie ma wartości (ma znaczenie dla require_value(s)). Zmiana jest oznaczana jako "dirty" przy on_change,
+// więc przywrócony stan jest wysyłany do PLC zaraz po otwarciu gniazda.
+void WagoNetVarComponent::apply_startup_values_() {
+  for (auto &var : this->variables_) {
+    if (var.restore_value) {
+      const std::string key = "wago_netvar:" + this->ip_address_ + ":" + std::to_string(this->port_) + ":" +
+                              std::to_string(this->list_id_) + ":" + var.name;
+      var.restore_pref = global_preferences->make_preference<float>(fnv1_hash(key));
+      float saved = 0;
+      if (var.restore_pref.load(&saved)) {
+        this->apply_value_(var, saved);
+        continue;
+      }
+    }
+    if (var.has_initial)
+      this->apply_value_(var, var.initial_value);
+  }
+}
+
+void WagoNetVarComponent::save_restore_value(const std::string &name, float value) {
+  VarDef *var = this->get_var(name);
+  if (var != nullptr && var->restore_value)
+    var->restore_pref.save(&value);
 }
 
 }  // namespace wago_netvar
