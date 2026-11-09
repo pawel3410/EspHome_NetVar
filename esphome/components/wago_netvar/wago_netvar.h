@@ -2,7 +2,9 @@
 
 #include "esphome/core/component.h"
 #include "esphome/core/hal.h"
+#include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
+#include "esphome/core/preferences.h"
 
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/number/number.h"
@@ -98,7 +100,21 @@ struct VarDef {
   std::string type_name;
   VariableType type{VariableType::BOOL};
   size_t size{0};
-  size_t byte_offset{0};  // podawany ręcznie w YAML, zwalidowany przez kod Pythona
+  size_t byte_offset{0};  // podawany ręcznie w YAML (lista niepakowana: domyślnie wyliczany), zwalidowany w Pythonie
+  uint16_t index{0};      // numer zmiennej w liście PLC (tylko lista niepakowana)
+
+  // Wartości początkowe i przywracanie (lista "write")
+  bool require_value{false};  // lista niepakowana: nie wysyłaj zmiennej, dopóki nie ma wartości
+  bool has_value{false};      // zmienna ma wartość: initial_value, przywrócona albo ustawiona w czasie pracy
+  bool restore_value{false};
+  bool has_initial{false};
+  double initial_value{0};
+  ESPPreferenceObject restore_pref;
+
+  // Watchdog odbioru (lista "read", opcja timeout)
+  uint32_t last_received{0};
+  bool received{false};
+  bool expired{false};
 
   sensor::Sensor *sensor_ptr{nullptr};
   binary_sensor::BinarySensor *binary_sensor_ptr{nullptr};
@@ -124,14 +140,30 @@ class WagoNetVarComponent : public PollingComponent {
   }
   void set_send_on_change(bool enable) { this->send_on_change_ = enable; }
   void set_min_interval(uint32_t ms) { this->min_interval_ms_ = ms; }
+  /// false = lista niepakowana: każda zmienna w osobnej ramce (var_index w nagłówku, var_count = 1).
+  void set_pack_variables(bool pack) { this->pack_variables_ = pack; }
+  /// Lista pakowana: dokładny rozmiar ładunku (0 = wynika z offsetów zmiennych, odbiór akceptuje dłuższe ramki).
+  void set_payload_size(uint16_t size) { this->configured_payload_size_ = size; }
+  /// Lista "read": po tym czasie (ms) bez ramki encje zmiennej przechodzą w stan "unknown" (0 = wyłączone).
+  void set_timeout(uint32_t ms) { this->timeout_ms_ = ms; }
+  /// Lista "write" pakowana: nie wysyłaj, dopóki wszystkie zmienne nie mają wartości.
+  void set_require_values(bool enable) { this->require_values_ = enable; }
 
-  void add_variable(const std::string &name, const std::string &type, uint16_t byte_offset);
+  void add_variable(const std::string &name, const std::string &type, uint16_t byte_offset, uint16_t index = 0,
+                    bool require_value = false);
 
   void register_sensor(const std::string &name, sensor::Sensor *entity);
   void register_binary_sensor(const std::string &name, binary_sensor::BinarySensor *entity);
   void register_text_sensor(const std::string &name, text_sensor::TextSensor *entity);
-  void register_switch(const std::string &name, switch_::Switch *entity);
-  void register_number(const std::string &name, number::Number *entity);
+  void register_switch(const std::string &name, switch_::Switch *entity, bool restore_value, bool has_initial,
+                       bool initial_value);
+  void register_number(const std::string &name, number::Number *entity, bool restore_value, bool has_initial,
+                       float initial_value);
+
+  /// Natychmiastowa wysyłka listy "write" (akcja wago_netvar.send). Respektuje require_value(s).
+  void send_now();
+  /// Zapisuje wartość encji do pamięci nieulotnej (opcja restore_value); wywoływane przez switch i number.
+  void save_restore_value(const std::string &name, float value);
 
   void set_rejected_packets_sensor(sensor::Sensor *sensor) { this->rejected_packets_sensor_ = sensor; }
   void set_rx_packets_sensor(sensor::Sensor *sensor) { this->rx_packets_sensor_ = sensor; }
@@ -183,6 +215,14 @@ class WagoNetVarComponent : public PollingComponent {
 
   // pomocnicze: transport
   bool ensure_udp_();
+  const VarDef *find_by_index_(uint16_t index) const;
+  void apply_startup_values_();
+  void apply_value_(VarDef &var, double value);
+  void mark_received_(VarDef &var);
+  void check_timeouts_();
+  void invalidate_variable_(const VarDef &var);
+  bool all_values_set_() const;
+  bool send_frame_(uint16_t var_index, uint16_t var_count, const uint8_t *data, size_t size);
   /// Waliduje ramkę i, jeśli jest poprawna, dekoduje ją i zlicza (rx_packets). Zwraca true, gdy ramka została przyjęta.
   bool accept_frame_(const uint8_t *frame, size_t packet_size, uint32_t remote_ip);
   bool validate_packet_(const uint8_t *frame, size_t packet_size, uint32_t remote_ip) const;
@@ -195,7 +235,7 @@ class WagoNetVarComponent : public PollingComponent {
 
   // pomocnicze: konwersja wartości
   VarDef *prepare_write_(const std::string &name);
-  void commit_(const VarDef &var, const uint8_t *bytes);
+  void commit_(VarDef &var, const uint8_t *bytes);
   void write_int64_(VarDef &var, int64_t value);
   void write_double_(VarDef &var, double value);
   void write_text_(VarDef &var, const std::string &text);
@@ -211,6 +251,12 @@ class WagoNetVarComponent : public PollingComponent {
   bool enable_write_{true};
   bool send_on_change_{false};
   uint32_t min_interval_ms_{500};
+  bool pack_variables_{true};
+  uint16_t configured_payload_size_{0};
+  bool exact_payload_size_{false};
+  uint32_t timeout_ms_{0};
+  bool require_values_{false};
+  bool gate_warned_{false};
   bool config_error_{false};
 
   // stan
