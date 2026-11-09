@@ -1,10 +1,13 @@
 import ipaddress
+import logging
 import re
 
+from esphome import automation
 import esphome.codegen as cg
 import esphome.config_validation as cv
 import esphome.final_validate as fv
 from esphome.components import binary_sensor, number, sensor, switch, text_sensor
+from esphome.core import Lambda
 from esphome.const import (
     CONF_ID,
     CONF_IP_ADDRESS,
@@ -13,12 +16,15 @@ from esphome.const import (
     CONF_NAME,
     CONF_PORT,
     CONF_STEP,
+    CONF_TIMEOUT,
     CONF_UPDATE_INTERVAL,
     ENTITY_CATEGORY_DIAGNOSTIC,
     STATE_CLASS_TOTAL_INCREASING,
 )
 
 DOMAIN = "wago_netvar"
+
+_LOGGER = logging.getLogger(__name__)
 
 # "network" zamiast "wifi": komponent działa zarówno przez Wi-Fi, jak i Ethernet.
 DEPENDENCIES = ["network"]
@@ -40,8 +46,18 @@ WagoNumber = wago_netvar_ns.class_("WagoNumber", number.Number)
 CONF_LIST_ID = "list_id"
 CONF_VAR_COUNT = "var_count"
 CONF_DIRECTION = "direction"
-CONF_SEND_ON_CHANGE = "send_on_change"
+CONF_ON_CHANGE = "on_change"
+CONF_SEND_ON_CHANGE = "send_on_change"  # przestarzała nazwa opcji on_change
 CONF_MIN_INTERVAL = "min_interval"
+CONF_MODE = "mode"  # alias direction (nazwa używana w integracji HA)
+CONF_PACK_VARIABLES = "pack_variables"
+CONF_PAYLOAD_SIZE = "payload_size"
+CONF_REQUIRE_VALUES = "require_values"  # lista write pakowana
+CONF_REQUIRE_VALUE = "require_value"  # zmienna listy write niepakowanej
+CONF_INDEX = "index"
+CONF_OFFSET = "offset"  # alias byte_offset (nazwa używana w integracji HA)
+CONF_RESTORE_VALUE = "restore_value"
+CONF_INITIAL_VALUE = "initial_value"
 
 CONF_VARIABLES = "variables"
 CONF_VAR_NAME = "name"
@@ -95,15 +111,33 @@ TYPE_SIZES = {
 }
 
 NUMERIC_TYPES = set(TYPE_SIZES) - {"BOOL"}
+# Typy czasowe: sensor pokazuje surową liczbę, text_sensor tekst IEC (T#1s500ms, D#2026-11-08, ...).
+TEMPORAL_TYPES = {"TIME", "DATE", "TIME_OF_DAY", "DATE_AND_TIME"}
 
-# Offset jest wymagany zawsze (zarówno dla "read", jak i "write"): dzięki temu w trybie "read"
-# można pominąć wybrane zmienne, a w trybie "write" układ ramki jest jawny i zgodny ze sterownikiem.
-VARIABLE_SCHEMA = cv.Schema(
-    {
-        cv.Required(CONF_VAR_NAME): cv.string_strict,
-        cv.Required(CONF_VAR_TYPE): cv.string_strict,
-        cv.Required(CONF_BYTE_OFFSET): cv.int_range(min=0, max=MAX_PAYLOAD_SIZE - 1),
-    }
+def migrate_variable_keys(config):
+    """Alias offset -> byte_offset (nazwa zgodna z integracją HA)."""
+    if CONF_OFFSET in config:
+        if CONF_BYTE_OFFSET in config:
+            raise cv.Invalid("Use only 'byte_offset' ('offset' is its alias)")
+        config[CONF_BYTE_OFFSET] = config.pop(CONF_OFFSET)
+    return config
+
+
+# Lista pakowana (domyślnie): byte_offset jest wymagany, dzięki czemu można pominąć wybrane zmienne,
+# a układ ramki jest jawny i zgodny ze sterownikiem. Lista niepakowana (pack_variables: false):
+# index to numer zmiennej w liście PLC (domyślnie kolejna wolna liczba od 0), a byte_offset to tylko
+# miejsce w buforze komponentu (domyślnie bezpośrednio za poprzednimi zmiennymi).
+VARIABLE_SCHEMA = cv.All(
+    migrate_variable_keys,
+    cv.Schema(
+        {
+            cv.Required(CONF_VAR_NAME): cv.string_strict,
+            cv.Required(CONF_VAR_TYPE): cv.string_strict,
+            cv.Optional(CONF_BYTE_OFFSET): cv.int_range(min=0, max=MAX_PAYLOAD_SIZE - 1),
+            cv.Optional(CONF_INDEX): cv.uint16_t,
+            cv.Optional(CONF_REQUIRE_VALUE): cv.boolean,
+        }
+    ),
 )
 
 SENSOR_SCHEMA = sensor.sensor_schema().extend(
@@ -118,8 +152,14 @@ TEXT_SENSOR_SCHEMA = text_sensor.text_sensor_schema().extend(
     {cv.Required(CONF_VARIABLE): cv.string_strict}
 )
 
+# restore_value: po restarcie przywracany jest ostatni stan i wysyłany do PLC (wbudowane restore_mode
+# przełącznika ESPHome jest ignorowane). initial_value: stan używany, gdy nie ma zapisanego.
 SWITCH_SCHEMA = switch.switch_schema(WagoSwitch).extend(
-    {cv.Required(CONF_VARIABLE): cv.string_strict}
+    {
+        cv.Required(CONF_VARIABLE): cv.string_strict,
+        cv.Optional(CONF_RESTORE_VALUE, default=False): cv.boolean,
+        cv.Optional(CONF_INITIAL_VALUE): cv.boolean,
+    }
 )
 
 # number.new_number() wymaga min_value / max_value / step, więc muszą być częścią schematu.
@@ -129,6 +169,8 @@ NUMBER_SCHEMA = number.number_schema(WagoNumber).extend(
         cv.Required(CONF_MIN_VALUE): cv.float_,
         cv.Required(CONF_MAX_VALUE): cv.float_,
         cv.Optional(CONF_STEP, default=1.0): cv.positive_float,
+        cv.Optional(CONF_RESTORE_VALUE, default=False): cv.boolean,
+        cv.Optional(CONF_INITIAL_VALUE): cv.float_,
     }
 )
 
@@ -137,6 +179,20 @@ STATS_SENSOR_SCHEMA = sensor.sensor_schema(
     entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
     state_class=STATE_CLASS_TOTAL_INCREASING,
 )
+
+
+def migrate_legacy_keys(config):
+    """Przenosi przestarzałą opcję send_on_change do on_change oraz alias mode do direction."""
+    if CONF_MODE in config:
+        if CONF_DIRECTION in config:
+            raise cv.Invalid("Use only 'direction' ('mode' is its alias)")
+        config[CONF_DIRECTION] = config.pop(CONF_MODE)
+    if CONF_SEND_ON_CHANGE in config:
+        if CONF_ON_CHANGE in config:
+            raise cv.Invalid("Use only 'on_change'; 'send_on_change' is its deprecated name")
+        _LOGGER.warning("wago_netvar: 'send_on_change' is deprecated, use 'on_change'")
+        config[CONF_ON_CHANGE] = config.pop(CONF_SEND_ON_CHANGE)
+    return config
 
 
 def validate_variable_type(value):
@@ -167,6 +223,35 @@ def get_type_size(type_name):
     if is_string_type(type_name):
         return int(type_name[7:-1]) + 1  # + kończący bajt 0x00
     return TYPE_SIZES[type_name]
+
+
+def assign_offsets_and_indices(variables, packed):
+    """Uzupełnia byte_offset i index oraz sprawdza ich spójność (te same reguły co w integracji HA)."""
+    if packed:
+        for variable in variables:
+            if CONF_BYTE_OFFSET not in variable:
+                raise cv.Invalid(f"Variable '{variable[CONF_VAR_NAME]}' requires byte_offset")
+            variable.pop(CONF_INDEX, None)
+        return
+
+    used = set()
+    for variable in variables:
+        if CONF_INDEX in variable:
+            if variable[CONF_INDEX] in used:
+                raise cv.Invalid(f"Duplicate variable index: {variable[CONF_INDEX]}")
+            used.add(variable[CONF_INDEX])
+
+    next_offset = 0
+    next_index = 0
+    for variable in variables:
+        if CONF_BYTE_OFFSET not in variable:
+            variable[CONF_BYTE_OFFSET] = next_offset
+        next_offset = max(next_offset, variable[CONF_BYTE_OFFSET] + get_type_size(variable[CONF_VAR_TYPE]))
+        if CONF_INDEX not in variable:
+            while next_index in used:
+                next_index += 1
+            variable[CONF_INDEX] = next_index
+            used.add(next_index)
 
 
 def ranges_overlap(start_a, size_a, start_b, size_b):
@@ -207,7 +292,8 @@ def allowed_for_mapping(mapping_name, variable_type):
     if mapping_name in (CONF_BINARY_SENSORS, CONF_SWITCHES):
         return variable_type == "BOOL"
     if mapping_name == CONF_TEXT_SENSORS:
-        return is_string_type(variable_type)
+        # STRING oraz typy czasowe (jako tekst IEC)
+        return is_string_type(variable_type) or variable_type in TEMPORAL_TYPES
     if mapping_name == CONF_NUMBERS:
         # liczba zapisywana do zmiennej STRING jest zamieniana na tekst
         return variable_type in NUMERIC_TYPES or is_string_type(variable_type)
@@ -229,6 +315,8 @@ def validate_config(config):
             "ip_address 255.255.255.255 cannot be a sender address; use 0.0.0.0 to accept any sender"
         )
 
+    packed = config[CONF_PACK_VARIABLES]
+
     names = set()
     normalized_variables = []
     for variable in variables:
@@ -239,21 +327,51 @@ def validate_config(config):
             raise cv.Invalid(f"Duplicate variable name: {name}")
         names.add(name)
 
-        normalized_variables.append(
-            {
-                CONF_VAR_NAME: name,
-                CONF_VAR_TYPE: validate_variable_type(variable[CONF_VAR_TYPE]),
-                CONF_BYTE_OFFSET: variable[CONF_BYTE_OFFSET],
-            }
-        )
+        normalized = {
+            CONF_VAR_NAME: name,
+            CONF_VAR_TYPE: validate_variable_type(variable[CONF_VAR_TYPE]),
+            CONF_REQUIRE_VALUE: variable.get(CONF_REQUIRE_VALUE, False),
+        }
+        for key in (CONF_BYTE_OFFSET, CONF_INDEX):
+            if key in variable:
+                normalized[key] = variable[key]
 
+        if CONF_REQUIRE_VALUE in variable and direction != "write":
+            raise cv.Invalid(f"require_value ('{name}') applies only to variables of write lists")
+        if normalized[CONF_REQUIRE_VALUE] and packed:
+            raise cv.Invalid(
+                f"require_value ('{name}') applies only to unpacked lists; "
+                "in a packed list use require_values of the list"
+            )
+        normalized_variables.append(normalized)
+
+    # require_values dotyczy listy write pakowanej; w liście niepakowanej służy require_value.
+    if direction == "write" and not packed and config[CONF_REQUIRE_VALUES]:
+        raise cv.Invalid(
+            "require_values applies only to packed lists; in an unpacked list use require_value of the variables"
+        )
+    if direction != "write":
+        config[CONF_REQUIRE_VALUES] = False
+
+    assign_offsets_and_indices(normalized_variables, packed)
     validate_layout(normalized_variables)
     config[CONF_VARIABLES] = normalized_variables
 
-    # var_count to liczba zmiennych na liście nadawcy/odbiorcy. Może być większa niż liczba
-    # zmiennych zdefiniowanych tutaj (pominięte zmienne), ale nie mniejsza.
+    needed = max(v[CONF_BYTE_OFFSET] + get_type_size(v[CONF_VAR_TYPE]) for v in normalized_variables)
+    if packed:
+        payload_size = config.get(CONF_PAYLOAD_SIZE, 0)
+        if payload_size and payload_size < needed:
+            raise cv.Invalid(
+                f"payload_size ({payload_size}) is lower than the size resulting from variable offsets ({needed})"
+            )
+        config[CONF_PAYLOAD_SIZE] = payload_size
+    else:
+        config[CONF_PAYLOAD_SIZE] = 0
+
+    # var_count to liczba zmiennych na liście nadawcy/odbiorcy (lista pakowana). Może być większa niż
+    # liczba zmiennych zdefiniowanych tutaj (pominięte zmienne), ale nie mniejsza.
     defined = len(normalized_variables)
-    if config[CONF_VAR_COUNT] == 0:
+    if not packed or config[CONF_VAR_COUNT] == 0:
         config[CONF_VAR_COUNT] = defined
     elif config[CONF_VAR_COUNT] < defined:
         raise cv.Invalid(
@@ -283,10 +401,16 @@ def validate_config(config):
                 raise cv.Invalid(f"Variable '{variable_name}' is mapped more than once")
             mapped_variables.add(variable_name)
 
-            if mapping_name == CONF_NUMBERS and entity[CONF_MIN_VALUE] >= entity[CONF_MAX_VALUE]:
-                raise cv.Invalid(
-                    f"numbers: min_value must be lower than max_value ('{variable_name}')"
-                )
+            if mapping_name == CONF_NUMBERS:
+                if entity[CONF_MIN_VALUE] >= entity[CONF_MAX_VALUE]:
+                    raise cv.Invalid(
+                        f"numbers: min_value must be lower than max_value ('{variable_name}')"
+                    )
+                initial = entity.get(CONF_INITIAL_VALUE)
+                if initial is not None and not entity[CONF_MIN_VALUE] <= initial <= entity[CONF_MAX_VALUE]:
+                    raise cv.Invalid(
+                        f"numbers: initial_value must be within min_value..max_value ('{variable_name}')"
+                    )
 
     read_entities = (
         config.get(CONF_SENSORS, [])
@@ -337,6 +461,7 @@ def final_validate(config):
 
 
 CONFIG_SCHEMA = cv.All(
+    migrate_legacy_keys,
     cv.Schema(
         {
             cv.Required(CONF_ID): cv.declare_id(WagoNetVarComponent),
@@ -345,7 +470,11 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_LIST_ID, default=1): cv.uint16_t,
             cv.Optional(CONF_VAR_COUNT, default=0): cv.uint16_t,
             cv.Optional(CONF_DIRECTION, default="write"): cv.one_of("read", "write", lower=True),
-            cv.Optional(CONF_SEND_ON_CHANGE, default=False): cv.boolean,
+            cv.Optional(CONF_PACK_VARIABLES, default=True): cv.boolean,
+            cv.Optional(CONF_PAYLOAD_SIZE): cv.int_range(min=1, max=MAX_PAYLOAD_SIZE),
+            cv.Optional(CONF_TIMEOUT, default="0s"): cv.positive_time_period_milliseconds,
+            cv.Optional(CONF_REQUIRE_VALUES, default=False): cv.boolean,
+            cv.Optional(CONF_ON_CHANGE, default=False): cv.boolean,
             cv.Optional(
                 CONF_MIN_INTERVAL, default="500ms"
             ): cv.positive_time_period_milliseconds,
@@ -374,8 +503,12 @@ async def to_code(config):
     cg.add(var.set_list_id(config[CONF_LIST_ID]))
     cg.add(var.set_var_count(config[CONF_VAR_COUNT]))
     cg.add(var.set_direction(config[CONF_DIRECTION]))
-    cg.add(var.set_send_on_change(config[CONF_SEND_ON_CHANGE]))
+    cg.add(var.set_send_on_change(config[CONF_ON_CHANGE]))
     cg.add(var.set_min_interval(config[CONF_MIN_INTERVAL]))
+    cg.add(var.set_pack_variables(config[CONF_PACK_VARIABLES]))
+    cg.add(var.set_payload_size(config[CONF_PAYLOAD_SIZE]))
+    cg.add(var.set_timeout(config[CONF_TIMEOUT]))
+    cg.add(var.set_require_values(config[CONF_REQUIRE_VALUES]))
 
     for variable in config[CONF_VARIABLES]:
         cg.add(
@@ -383,6 +516,8 @@ async def to_code(config):
                 variable[CONF_VAR_NAME],
                 variable[CONF_VAR_TYPE],
                 variable[CONF_BYTE_OFFSET],
+                variable.get(CONF_INDEX, 0),
+                variable[CONF_REQUIRE_VALUE],
             )
         )
 
@@ -401,7 +536,16 @@ async def to_code(config):
     for entity_config in config.get(CONF_SWITCHES, []):
         entity = await switch.new_switch(entity_config)
         cg.add(entity.set_parent(var, entity_config[CONF_VARIABLE]))
-        cg.add(var.register_switch(entity_config[CONF_VARIABLE], entity))
+        initial = entity_config.get(CONF_INITIAL_VALUE)
+        cg.add(
+            var.register_switch(
+                entity_config[CONF_VARIABLE],
+                entity,
+                entity_config[CONF_RESTORE_VALUE],
+                initial is not None,
+                bool(initial),
+            )
+        )
 
     for entity_config in config.get(CONF_NUMBERS, []):
         entity = await number.new_number(
@@ -411,8 +555,29 @@ async def to_code(config):
             step=entity_config[CONF_STEP],
         )
         cg.add(entity.set_parent(var, entity_config[CONF_VARIABLE]))
-        cg.add(var.register_number(entity_config[CONF_VARIABLE], entity))
+        initial = entity_config.get(CONF_INITIAL_VALUE)
+        cg.add(
+            var.register_number(
+                entity_config[CONF_VARIABLE],
+                entity,
+                entity_config[CONF_RESTORE_VALUE],
+                initial is not None,
+                float(initial or 0.0),
+            )
+        )
 
     for key, (setter, _suffix) in STATS_SENSORS.items():
         sens = await sensor.new_sensor(config[key])
         cg.add(getattr(var, setter)(sens))
+
+
+# Akcja "wago_netvar.send": natychmiastowa wysyłka listy write (niezależnie od on_change i update_interval).
+# Zrealizowana jako LambdaAction (bez własnej klasy Action), więc nie zależy od wersji API automatyzacji ESPHome.
+SEND_ACTION_SCHEMA = automation.maybe_simple_id({cv.Required(CONF_ID): cv.use_id(WagoNetVarComponent)})
+
+
+@automation.register_action("wago_netvar.send", automation.LambdaAction, SEND_ACTION_SCHEMA)
+async def send_action_to_code(config, action_id, template_arg, args):
+    parent = await cg.get_variable(config[CONF_ID])
+    lambda_ = await cg.process_lambda(Lambda(f"{parent}->send_now();"), args, return_type=cg.void)
+    return cg.new_Pvariable(action_id, template_arg, lambda_)
