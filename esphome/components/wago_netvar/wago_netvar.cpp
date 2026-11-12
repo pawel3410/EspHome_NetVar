@@ -35,6 +35,16 @@ static constexpr uint32_t UDP_RETRY_INTERVAL_MS = 5000;
 static constexpr uint32_t STATS_PUBLISH_INTERVAL_MS = 1000;
 static constexpr uint32_t STATS_UNPUBLISHED = 0xFFFFFFFFu;
 
+// Sumy liczników wszystkich list (wszystkie instancje komponentu w jednym urządzeniu).
+struct Totals {
+  uint32_t rejected_packets{0};
+  uint32_t rx_packets{0};
+  uint32_t tx_packets{0};
+  uint32_t rx_errors{0};
+  uint32_t tx_errors{0};
+};
+static Totals g_totals;
+
 // ---------------------------------------------------------------------------------------------
 // Transport UDP
 // ---------------------------------------------------------------------------------------------
@@ -300,6 +310,11 @@ std::string format_decimal(double value) {
   return buffer;
 }
 
+// Czy minął odstęp min_interval od ostatniej wysyłki (pierwsza wysyłka nie jest ograniczona).
+inline bool interval_elapsed(bool sent_once, uint32_t last_sent, uint32_t min_interval) {
+  return !sent_once || millis() - last_sent >= min_interval;
+}
+
 inline bool is_temporal_type(VariableType type) {
   return type == VariableType::TIME || type == VariableType::DATE || type == VariableType::TIME_OF_DAY ||
          type == VariableType::DATE_AND_TIME;
@@ -459,7 +474,10 @@ class PortReceiver {
       if (size < 0) {
         // Błąd gniazda: zliczamy go na wszystkich listach portu i otwieramy gniazdo ponownie (po odstępie).
         for (auto *listener : this->listeners_)
+        {
           ++listener->rx_errors_;
+          ++g_totals.rx_errors;
+        }
         ESP_LOGW(TAG, "UDP receive error on port %u, socket will be reopened", static_cast<unsigned>(this->port_));
         this->started_ = false;
         this->attempted_ = true;
@@ -523,7 +541,10 @@ class PortReceiver {
 
     for (auto *listener : this->listeners_) {
       if (!has_candidate || listener->list_id_ == list_id)
+      {
         ++listener->rejected_packets_;
+        ++g_totals.rejected_packets;
+      }
     }
   }
 
@@ -587,7 +608,7 @@ void WagoNetVarComponent::add_variable(const std::string &name, const std::strin
   this->variables_.push_back(std::move(var));
 }
 
-void WagoNetVarComponent::register_sensor(const std::string &name, sensor::Sensor *entity) {
+void WagoNetVarComponent::register_sensor(const std::string &name, sensor::Sensor *entity, bool zero_as_unavailable) {
   VarDef *var = this->get_var(name);
   if (var == nullptr || entity == nullptr || !is_numeric_type(var->type)) {
     this->fail_config_("invalid sensor mapping", name);
@@ -598,6 +619,7 @@ void WagoNetVarComponent::register_sensor(const std::string &name, sensor::Senso
     return;
   }
   var->sensor_ptr = entity;
+  var->zero_as_unavailable = zero_as_unavailable;
 }
 
 void WagoNetVarComponent::register_binary_sensor(const std::string &name, binary_sensor::BinarySensor *entity) {
@@ -742,6 +764,7 @@ void WagoNetVarComponent::setup() {
 
   this->payload_.assign(this->payload_size_, 0);
   std::fill(std::begin(this->published_stats_), std::end(this->published_stats_), STATS_UNPUBLISHED);
+  std::fill(std::begin(this->published_totals_), std::end(this->published_totals_), STATS_UNPUBLISHED);
 
   if (this->enable_read_) {
     // Wszystkie listy "read" o tym samym porcie współdzielą jedno gniazdo (PortReceiver), a ramki są
@@ -829,6 +852,11 @@ void WagoNetVarComponent::dump_config() {
   LOG_SENSOR("  ", "TX packets", this->tx_packets_sensor_);
   LOG_SENSOR("  ", "RX errors", this->rx_errors_sensor_);
   LOG_SENSOR("  ", "TX errors", this->tx_errors_sensor_);
+  LOG_SENSOR("  ", "Total rejected packets", this->total_rejected_packets_sensor_);
+  LOG_SENSOR("  ", "Total RX packets", this->total_rx_packets_sensor_);
+  LOG_SENSOR("  ", "Total TX packets", this->total_tx_packets_sensor_);
+  LOG_SENSOR("  ", "Total RX errors", this->total_rx_errors_sensor_);
+  LOG_SENSOR("  ", "Total TX errors", this->total_tx_errors_sensor_);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -849,7 +877,7 @@ void WagoNetVarComponent::loop() {
   }
 
   if (this->ensure_udp_())
-    this->trigger_send_();
+    this->process_on_change_();
 }
 
 const VarDef *WagoNetVarComponent::find_by_index_(uint16_t index) const {
@@ -864,6 +892,7 @@ bool WagoNetVarComponent::accept_frame_(const uint8_t *frame, size_t packet_size
   if (!this->validate_packet_(frame, packet_size, remote_ip))
     return false;
   ++this->rx_packets_;
+  ++g_totals.rx_packets;
 
   const uint8_t *payload = frame + NETVAR_HEADER_SIZE;
   if (this->pack_variables_) {
@@ -893,6 +922,11 @@ bool WagoNetVarComponent::validate_packet_(const uint8_t *header, size_t packet_
     return false;
 
   if (std::memcmp(header, MAGIC_BYTES, sizeof(MAGIC_BYTES)) != 0)
+    return false;
+
+  // Typ wiadomości (bajty 4-7; w dokumentacji 3S pole "ID"): 0 = dane zmiennych sieciowych. Inne wartości to
+  // potwierdzenia, prośby bootup i wymiana parametrów (SDO), które nie niosą wartości zmiennych.
+  if (load_le(&header[4], 4) != 0)
     return false;
 
   if (read_u16(&header[8]) != this->list_id_)
@@ -1007,6 +1041,10 @@ void WagoNetVarComponent::publish_variable_(const VarDef &var) {
     return;
   // REAL nieskończony lub nieliczbowy (NaN/Inf) jest publikowany jako NaN, który ESPHome pokazuje jako "unknown".
   const double value = this->decode_number_(var, data);
+  if (var.zero_as_unavailable && value == 0.0) {
+    var.sensor_ptr->publish_state(NAN);  // zero oznacza brak wartości (zero_as_unavailable)
+    return;
+  }
   var.sensor_ptr->publish_state(std::isfinite(value) ? static_cast<float>(value) : NAN);
 }
 
@@ -1016,6 +1054,13 @@ void WagoNetVarComponent::publish_statistics_() {
   publish_counter(this->tx_packets_sensor_, this->tx_packets_, this->published_stats_[2]);
   publish_counter(this->rx_errors_sensor_, this->rx_errors_, this->published_stats_[3]);
   publish_counter(this->tx_errors_sensor_, this->tx_errors_, this->published_stats_[4]);
+
+  // Sumy wszystkich list publikuje tylko lista, która ma sensory total_* (sensory nie istnieją na pozostałych).
+  publish_counter(this->total_rejected_packets_sensor_, g_totals.rejected_packets, this->published_totals_[0]);
+  publish_counter(this->total_rx_packets_sensor_, g_totals.rx_packets, this->published_totals_[1]);
+  publish_counter(this->total_tx_packets_sensor_, g_totals.tx_packets, this->published_totals_[2]);
+  publish_counter(this->total_rx_errors_sensor_, g_totals.rx_errors, this->published_totals_[3]);
+  publish_counter(this->total_tx_errors_sensor_, g_totals.tx_errors, this->published_totals_[4]);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1028,11 +1073,23 @@ void WagoNetVarComponent::update() {
     this->send_packet_();
 }
 
-void WagoNetVarComponent::trigger_send_() {
-  if (!this->enable_write_ || !this->send_on_change_ || !this->is_dirty_)
+// Wysyłka przy zmianie (on_change), wywoływana w każdej iteracji pętli.
+// - lista pakowana: gdy zmieniła się dowolna zmienna, wysyłana jest cała lista (jedna ramka),
+// - lista niepakowana: wysyłane są tylko zmienne, które zmieniły wartość (każda własną ramką).
+// min_interval to minimalny odstęp między kolejnymi wysyłkami tej samej ramki (listy albo zmiennej). Zmiana, która
+// nastąpiła przed upływem odstępu, jest wysyłana dopiero po jego upływie (zmiany w tym czasie są scalane).
+void WagoNetVarComponent::process_on_change_() {
+  if (!this->enable_write_ || !this->send_on_change_)
     return;
-  if (millis() - this->last_sent_time_ >= this->min_interval_ms_)
-    this->send_packet_();
+  if (this->pack_variables_) {
+    if (this->is_dirty_ && interval_elapsed(this->sent_once_, this->last_sent_time_, this->min_interval_ms_))
+      this->send_list_();
+    return;
+  }
+  for (auto &var : this->variables_) {
+    if (var.dirty && interval_elapsed(var.sent_once, var.last_sent, this->min_interval_ms_))
+      this->send_variable_(var);
+  }
 }
 
 bool WagoNetVarComponent::all_values_set_() const {
@@ -1050,7 +1107,8 @@ void WagoNetVarComponent::send_now() {
 
 // Wysyła jedną ramkę: lista pakowana (var_index 0, var_count z konfiguracji, cały ładunek) albo jedna zmienna
 // listy niepakowanej (var_index zmiennej, var_count 1). Pola flag i checksum pozostają 0.
-bool WagoNetVarComponent::send_frame_(uint16_t var_index, uint16_t var_count, const uint8_t *data, size_t size) {
+bool WagoNetVarComponent::send_frame_(uint16_t var_index, uint16_t var_count, const uint8_t *data, size_t size,
+                                      uint16_t &sequence) {
   const size_t total_length = NETVAR_HEADER_SIZE + size;
   uint8_t *frame = this->frame_.data();
 
@@ -1060,48 +1118,62 @@ bool WagoNetVarComponent::send_frame_(uint16_t var_index, uint16_t var_count, co
   write_u16(&frame[10], var_index);
   write_u16(&frame[12], var_count);
   write_u16(&frame[14], static_cast<uint16_t>(total_length));
-  write_u16(&frame[16], this->sequence_counter_);
+  write_u16(&frame[16], sequence);
   std::memcpy(frame + NETVAR_HEADER_SIZE, data, size);
 
   if (!this->udp_->send(this->ip_, this->port_, frame, total_length)) {
     ++this->tx_errors_;
+    ++g_totals.tx_errors;
     return false;
   }
   ++this->tx_packets_;
-  ++this->sequence_counter_;
+  ++g_totals.tx_packets;
+  ++sequence;
   return true;
 }
 
+// Cała lista pakowana w jednej ramce (var_index 0, var_count z konfiguracji). sequence_counter jest wspólny dla listy.
+void WagoNetVarComponent::send_list_() {
+  // require_values: lista nie jest wysyłana, dopóki każda zmienna nie ma wartości.
+  if (this->require_values_ && !this->all_values_set_()) {
+    if (!this->gate_warned_) {
+      ESP_LOGW(TAG, "List %u: not sent, some variables have no value yet", static_cast<unsigned>(this->list_id_));
+      this->gate_warned_ = true;
+    }
+    return;
+  }
+  this->gate_warned_ = false;
+  const bool ok = this->send_frame_(0, this->var_count_, this->payload_.data(), this->payload_size_,
+                                    this->sequence_counter_);
+  // Czas jest zapisywany także przy błędzie, aby nieudana wysyłka była ponawiana najwyżej raz na min_interval.
+  this->last_sent_time_ = millis();
+  this->sent_once_ = true;
+  if (ok)
+    this->is_dirty_ = false;
+}
+
+// Jedna zmienna listy niepakowanej w osobnej ramce (var_index zmiennej, var_count 1), z własnym sequence_counter.
+// Zmienna z require_value bez wartości jest pomijana.
+void WagoNetVarComponent::send_variable_(VarDef &var) {
+  if (var.require_value && !var.has_value)
+    return;
+  const bool ok = this->send_frame_(var.index, 1, this->payload_.data() + var.byte_offset, var.size, var.sequence);
+  var.last_sent = millis();
+  var.sent_once = true;
+  if (ok)
+    var.dirty = false;
+}
+
+// Wysyłka wszystkiego: cykliczna (update_interval) i na żądanie (send_now). Lista niepakowana: wszystkie zmienne.
 void WagoNetVarComponent::send_packet_() {
   if (!this->enable_write_ || !this->udp_started_ || this->payload_size_ == 0)
     return;
-
-  bool ok = true;
   if (this->pack_variables_) {
-    // require_values: lista nie jest wysyłana, dopóki każda zmienna nie ma wartości.
-    if (this->require_values_ && !this->all_values_set_()) {
-      if (!this->gate_warned_) {
-        ESP_LOGW(TAG, "List %u: not sent, some variables have no value yet", static_cast<unsigned>(this->list_id_));
-        this->gate_warned_ = true;
-      }
-      return;
-    }
-    this->gate_warned_ = false;
-    ok = this->send_frame_(0, this->var_count_, this->payload_.data(), this->payload_size_);
-  } else {
-    // Lista niepakowana: każda zmienna w osobnej ramce; zmienne z require_value bez wartości są pomijane.
-    for (const auto &var : this->variables_) {
-      if (var.require_value && !var.has_value)
-        continue;
-      if (!this->send_frame_(var.index, 1, this->payload_.data() + var.byte_offset, var.size))
-        ok = false;
-    }
+    this->send_list_();
+    return;
   }
-
-  // Ustawiane także przy błędzie, aby nieudana wysyłka była ponawiana najwyżej raz na min_interval.
-  this->last_sent_time_ = millis();
-  if (ok)
-    this->is_dirty_ = false;
+  for (auto &var : this->variables_)
+    this->send_variable_(var);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1128,17 +1200,20 @@ void WagoNetVarComponent::commit_(VarDef &var, const uint8_t *bytes) {
   var.has_value = true;
 
   uint8_t *destination = this->payload_.data() + var.byte_offset;
-  if (std::memcmp(destination, bytes, var.size) == 0) {
-    if (first_value && this->send_on_change_)
-      this->is_dirty_ = true;
-    return;
-  }
-  std::memcpy(destination, bytes, var.size);
+  const bool changed = std::memcmp(destination, bytes, var.size) != 0;
+  if (changed)
+    std::memcpy(destination, bytes, var.size);
+  if (!changed && !first_value)
+    return;  // wartość bez zmiany: nic do wysłania
 
   // Tylko oznaczamy zmianę; faktyczna wysyłka następuje w loop(). Dzięki temu kilka zmian wykonanych
-  // w jednej lambdzie trafia do jednej ramki, a nie do ramki częściowej + opóźnionej o min_interval.
-  if (this->send_on_change_)
-    this->is_dirty_ = true;
+  // w jednej lambdzie trafia do jednej ramki (lista pakowana), a nie do ramki częściowej + opóźnionej o min_interval.
+  if (this->send_on_change_) {
+    if (this->pack_variables_)
+      this->is_dirty_ = true;
+    else
+      var.dirty = true;  // lista niepakowana: wysłana zostanie tylko ta zmienna
+  }
 }
 
 void WagoNetVarComponent::write_int64_(VarDef &var, int64_t value) {
