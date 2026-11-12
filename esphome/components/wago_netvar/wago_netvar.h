@@ -106,6 +106,13 @@ struct VarDef {
   // Wartości początkowe i przywracanie (lista "write")
   bool require_value{false};  // lista niepakowana: nie wysyłaj zmiennej, dopóki nie ma wartości
   bool has_value{false};      // zmienna ma wartość: initial_value, przywrócona albo ustawiona w czasie pracy
+  bool zero_as_unavailable{false};  // sensor: zero jest publikowany jako "unknown"
+
+  // Wysyłka (lista "write" niepakowana): każda zmienna ma własny stan zmiany, odstęp min_interval i licznik sequence
+  bool dirty{false};       // wartość zmieniła się od ostatniej wysyłki (tylko przy on_change)
+  bool sent_once{false};
+  uint32_t last_sent{0};
+  uint16_t sequence{1};    // sequence_counter ramek tej zmiennej (bajty 16-17)
   bool restore_value{false};
   bool has_initial{false};
   double initial_value{0};
@@ -152,7 +159,7 @@ class WagoNetVarComponent : public PollingComponent {
   void add_variable(const std::string &name, const std::string &type, uint16_t byte_offset, uint16_t index = 0,
                     bool require_value = false);
 
-  void register_sensor(const std::string &name, sensor::Sensor *entity);
+  void register_sensor(const std::string &name, sensor::Sensor *entity, bool zero_as_unavailable = false);
   void register_binary_sensor(const std::string &name, binary_sensor::BinarySensor *entity);
   void register_text_sensor(const std::string &name, text_sensor::TextSensor *entity);
   void register_switch(const std::string &name, switch_::Switch *entity, bool restore_value, bool has_initial,
@@ -170,6 +177,13 @@ class WagoNetVarComponent : public PollingComponent {
   void set_tx_packets_sensor(sensor::Sensor *sensor) { this->tx_packets_sensor_ = sensor; }
   void set_rx_errors_sensor(sensor::Sensor *sensor) { this->rx_errors_sensor_ = sensor; }
   void set_tx_errors_sensor(sensor::Sensor *sensor) { this->tx_errors_sensor_ = sensor; }
+
+  // Sumy liczników wszystkich list (tworzone tylko na jednej liście; patrz total_* w README).
+  void set_total_rejected_packets_sensor(sensor::Sensor *sensor) { this->total_rejected_packets_sensor_ = sensor; }
+  void set_total_rx_packets_sensor(sensor::Sensor *sensor) { this->total_rx_packets_sensor_ = sensor; }
+  void set_total_tx_packets_sensor(sensor::Sensor *sensor) { this->total_tx_packets_sensor_ = sensor; }
+  void set_total_rx_errors_sensor(sensor::Sensor *sensor) { this->total_rx_errors_sensor_ = sensor; }
+  void set_total_tx_errors_sensor(sensor::Sensor *sensor) { this->total_tx_errors_sensor_ = sensor; }
 
   // ---- API czasu działania (lambdy, switch, number); tylko listy "write" ----
   // Wartość jest konwertowana na typ NetVar zmiennej. Przy przepełnieniu typu całkowitego zachowywane są
@@ -222,7 +236,9 @@ class WagoNetVarComponent : public PollingComponent {
   void check_timeouts_();
   void invalidate_variable_(const VarDef &var);
   bool all_values_set_() const;
-  bool send_frame_(uint16_t var_index, uint16_t var_count, const uint8_t *data, size_t size);
+  bool send_frame_(uint16_t var_index, uint16_t var_count, const uint8_t *data, size_t size, uint16_t &sequence);
+  void send_list_();
+  void send_variable_(VarDef &var);
   /// Waliduje ramkę i, jeśli jest poprawna, dekoduje ją i zlicza (rx_packets). Zwraca true, gdy ramka została przyjęta.
   bool accept_frame_(const uint8_t *frame, size_t packet_size, uint32_t remote_ip);
   bool validate_packet_(const uint8_t *frame, size_t packet_size, uint32_t remote_ip) const;
@@ -230,7 +246,7 @@ class WagoNetVarComponent : public PollingComponent {
   void publish_variable_(const VarDef &var);
   void publish_statistics_();
 
-  void trigger_send_();
+  void process_on_change_();
   void send_packet_();
 
   // pomocnicze: konwersja wartości
@@ -270,7 +286,10 @@ class WagoNetVarComponent : public PollingComponent {
   bool udp_attempted_{false};
   uint32_t last_udp_attempt_{0};
 
+  // Lista pakowana: jeden stan zmiany, jeden odstęp min_interval i jeden sequence_counter na całą listę.
+  // Lista niepakowana: te same informacje są w VarDef (osobno dla każdej zmiennej).
   bool is_dirty_{false};
+  bool sent_once_{false};
   uint32_t last_sent_time_{0};
   uint16_t sequence_counter_{1};
 
@@ -280,6 +299,7 @@ class WagoNetVarComponent : public PollingComponent {
   uint32_t tx_errors_{0};
   uint32_t rejected_packets_{0};
   uint32_t published_stats_[STATS_COUNT];
+  uint32_t published_totals_[STATS_COUNT];
   uint32_t last_stats_time_{0};
 
   sensor::Sensor *rejected_packets_sensor_{nullptr};
@@ -287,6 +307,12 @@ class WagoNetVarComponent : public PollingComponent {
   sensor::Sensor *tx_packets_sensor_{nullptr};
   sensor::Sensor *rx_errors_sensor_{nullptr};
   sensor::Sensor *tx_errors_sensor_{nullptr};
+
+  sensor::Sensor *total_rejected_packets_sensor_{nullptr};
+  sensor::Sensor *total_rx_packets_sensor_{nullptr};
+  sensor::Sensor *total_tx_packets_sensor_{nullptr};
+  sensor::Sensor *total_rx_errors_sensor_{nullptr};
+  sensor::Sensor *total_tx_errors_sensor_{nullptr};
 };
 
 }  // namespace wago_netvar
