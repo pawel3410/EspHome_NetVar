@@ -17,14 +17,14 @@ Nagłówek ma stały rozmiar 20 bajtów i jest przesyłany w kolejności little 
 | Bajty | Pole              | Opis                                                                                          |
 |-------|-------------------|-----------------------------------------------------------------------------------------------|
 | 0–3   | Magic bytes       | Sygnatura: `0x00 0x2D 0x53 0x33`                                                              |
-| 4–7   | Zarezerwowane     | Zerowane                                                                                      |
+| 4–7   | message_type      | Typ wiadomości (w dokumentacji 3S pole „ID”; nie mylić z list_ID): `0` = dane zmiennych sieciowych. Inne wartości oznaczają potwierdzenia, prośby bootup i wymianę parametrów (SDO). Przy odbiorze ramki z wartością różną od `0` są odrzucane, przy wysyłce `0` |
 | 8–9   | list_ID           | Identyfikator listy (uint16 LE)                                                               |
 | 10–11 | var_index         | Numer zmiennej w liście niepakowanej (lista pakowana: `0`)                                    |
 | 12–13 | var_count         | Liczba zmiennych na liście (uint16 LE)                                                        |
 | 14–15 | frame_size        | Całkowita długość ramki w bajtach (nagłówek + payload) (uint16 LE)                            |
-| 16–17 | sequence_counter  | Licznik sekwencyjny (przy odbiorze odczytywany, nie walidowany; przy wysyłce zwiększany)      |
-| 18    | checksum_present  | Flagi: `00` bez sumy kontrolnej, `02` z sumą kontrolną (przy wysyłce `00`)                    |
-| 19    | checksum          | Suma kontrolna (przy odbiorze nie walidowana, przy wysyłce `00`)                              |
+| 16–17 | sequence_counter  | Licznik sekwencyjny (przy odbiorze odczytywany, nie walidowany; przy wysyłce zwiększany od 1). Lista pakowana: jeden licznik na listę, lista niepakowana: osobny licznik dla każdej zmiennej |
+| 18    | flags             | Flagi (bit 0: żądanie potwierdzenia, bit 1: żądanie sprawdzenia sumy, bit 2: błędna suma); przy odbiorze nie walidowane, przy wysyłce `00` |
+| 19    | checksum          | Suma kontrolna (algorytm nieznany); przy odbiorze nie walidowana, przy wysyłce `00`           |
 | 20–N  | Payload           | Wartości zmiennych zgodnie z układem pamięci                                                  |
 
 Maksymalny rozmiar ramki to 1472 bajty (nagłówek + 1452 bajty ładunku).
@@ -35,7 +35,7 @@ Lista **pakowana** (domyślnie) wysyła wszystkie zmienne w jednej ramce: `var_i
 
 Wszystkie typy są little endian. LREAL nie jest obsługiwany przez NetVar.
 
-| Typ NetVar | Rozmiar | Zakres / opis | Encja ESPHome (`read`) | Encja ESPHome (`write`) | Typ w Home Assistant |
+| Typ NetVar | Rozmiar | Zakres / opis | `entity` (lista `read`) | `entity` (lista `write`) | Typ w Home Assistant |
 |------------|---------|---------------|------------------------|-------------------------|----------------------|
 | BOOL | 1 bajt | 0 = FAŁSZ, 1 = PRAWDA | `binary_sensor` | `switch` | `binary_sensor` / `switch` |
 | BYTE | 1 bajt | 0–255 (maska bitowa) | `sensor` | `number` | `sensor` / `number` |
@@ -52,57 +52,77 @@ Wszystkie typy są little endian. LREAL nie jest obsługiwany przez NetVar.
 | TIME_OF_DAY (TOD) | 4 bajty | Czas doby w ms (UDINT) | `sensor` | `number` | `sensor` / `number` |
 | DATE_AND_TIME (DT) | 4 bajty | Data i czas w s od 1970-01-01 (UDINT) | `sensor` | `number` | `sensor` / `number` |
 | REAL | 4 bajty | Liczba zmiennoprzecinkowa IEEE-754 | `sensor` | `number` | `sensor` / `number` |
-| STRING(n) | n + 1 bajt | Tekst ASCII zakończony nullem (0x00), domyślnie 80 znaków, max 255 | `text_sensor` | `number` (liczba zapisana jako tekst) lub `set_variable_value()` | `text_sensor` / `number` |
+| STRING(n) | n + 1 bajt | Tekst ASCII zakończony nullem (0x00), domyślnie 80 znaków, max 255 | `sensor` (ESPHome tworzy `text_sensor`) | `number` (liczba zapisana jako tekst) lub `set_variable_value()` | `sensor` / `number` |
 
-W YAML typy `TIME_OF_DAY` i `DATE_AND_TIME` można zapisać również jako `TOD` i `DT`; zapis `STRING` bez długości oznacza `STRING(80)`.
+W YAML typy `TIME_OF_DAY` i `DATE_AND_TIME` można zapisać również jako `TOD` i `DT`. Długość STRING podaje się jak w Home Assistant (`type: STRING`, `length: 20`) albo w nazwie typu (`STRING(20)`); zapis `STRING` bez długości oznacza `STRING(80)`. Typy czasowe w encji `sensor` są domyślnie pokazywane jako tekst IEC (patrz „Typy czasowe”).
 
 ## Konfiguracja ESPHome
 
-Zmienne definiuje się w sekcji `variables:`. Encje (sensory, przełączniki, itp.) są **zagnieżdżone** w konfiguracji komponentu (listy `sensors`, `binary_sensors`, `text_sensors`, `switches`, `numbers`) i mapowane na zmienne przez pole `variable`. Nie używa się w nich pola `platform:`.
+Konfiguracja jest **taka sama jak w integracji Home Assistant** (te same nazwy parametrów, te same domyślne wartości). Rodzaj encji podaje się bezpośrednio przy zmiennej parametrem `entity` (`sensor`, `binary_sensor`, `switch`, `number`); osobnych list `sensors:`, `switches:` itd. nie ma, a pole `platform:` nie jest używane. Parametr `name` zmiennej jest nazwą encji.
 
-### Pełna lista opcji konfiguracyjnych
+```yaml
+wago_netvar:
+  - ip_address: "192.168.17.45"
+    list_id: 124
+    mode: read
+    variables:
+      - name: "Temperatura"
+        unique_id: "temperatura"
+        offset: 0
+        type: REAL
+        entity: sensor
+        device_class: temperature
+        state_class: measurement
+        unit_of_measurement: "°C"
+```
+
+### Parametry listy
 
 | Opcja | Wymagana | Domyślna | Opis |
 |-------|----------|----------|------|
-| `id` | Tak | – | Unikalny identyfikator komponentu ESPHome (używany też do nazw automatycznych sensorów statystyk). |
-| `ip_address` | Tak | – | Adres IPv4 odbiorcy/nadawcy. W trybie `read` może być `0.0.0.0` (akceptuj pakiety z dowolnego IP); `255.255.255.255` jest tam niedozwolony. W trybie `write` nie może być `0.0.0.0` (dozwolony broadcast `255.255.255.255`). |
+| `id` | Nie | generowany | Identyfikator komponentu ESPHome. Potrzebny tylko wtedy, gdy odwołujesz się do listy w lambdzie lub akcji `wago_netvar.send`. |
+| `ip_address` | Tak | – | Adres IPv4 nadawcy (`read`) albo odbiorcy (`write`). W trybie `read` może być `0.0.0.0` (dowolny nadawca); `255.255.255.255` jest tam niedozwolony. W trybie `write` nie może być `0.0.0.0` (dozwolony broadcast `255.255.255.255`). |
 | `port` | Nie | `1202` | Port UDP: w trybie `read` port nasłuchu (może być wspólny dla wielu list `read`), w trybie `write` port docelowy. |
-| `list_id` | Nie | `1` | Identyfikator listy NetVar (bajty 8–9 ramki). W trybie `read` służy do rozdzielania ramek między listy współdzielące port. |
-| `var_count` | Nie | `0` | Liczba zmiennych na liście NetVar (bajty 12–13). Jeśli `0`, zostanie ustawiona na liczbę zdefiniowanych zmiennych. Może być **większa** niż liczba zdefiniowanych zmiennych (gdy część zmiennych listy jest pomijana), ale nie mniejsza. |
-| `direction` | Nie | `write` | Kierunek komunikacji: `read` (odbiór) lub `write` (wysyłka). Alias: `mode` (nazwa używana w integracji Home Assistant). |
-| `pack_variables` | Nie | `true` | `true`: lista pakowana (jedna ramka z wszystkimi zmiennymi). `false`: lista niepakowana (każda zmienna w osobnej ramce z `var_index`, `var_count = 1`). W trybie niepakowanym `var_count` i `payload_size` są ignorowane. |
-| `payload_size` | Nie | – | Tylko lista pakowana: dokładny rozmiar ładunku w bajtach (nie mniejszy niż wynika z offsetów, max 1452). Przy odbiorze ramka o innym rozmiarze ładunku jest odrzucana; bez tej opcji akceptowane są ramki dłuższe (zmienne za ostatnią zdefiniowaną są pomijane). Przy wysyłce określa rozmiar ładunku. |
-| `timeout` | Nie | `0s` | Tylko `read`: jeśli przez ten czas nie nadejdzie ramka ze zmienną, jej encje przechodzą w stan „unknown” (patrz „Timeout odbioru”). `0s` wyłącza. |
-| `require_values` | Nie | `false` | Tylko `write`, lista pakowana: nie wysyłaj listy, dopóki **każda** zmienna nie ma wartości (patrz „Wartości początkowe i przywracanie”). W liście niepakowanej służy `require_value` przy zmiennych. |
-| `on_change` | Nie | `false` | Czy wysyłać ramkę po zmianie wartości zmiennej (tryb `write`). Zmiany wykonane w tej samej iteracji pętli (np. kilka `set_variable_value()` w jednej lambdzie) trafiają do jednej ramki. Nazwa jest zgodna z integracją Home Assistant. Dotychczasowa nazwa `send_on_change` nadal działa, ale jest przestarzała (ostrzeżenie przy kompilacji). |
-| `min_interval` | Nie | `500ms` | Minimalny odstęp czasu między wysyłkami przy `on_change: true`. |
-| `update_interval` | Nie | `5s` | Interwał cyklicznej wysyłki ramki w trybie `write`. `0s` (lub `never`) wyłącza wysyłkę cykliczną. Działa równolegle z `on_change`. W trybie `read` jest ignorowany. |
-| `variables` | Tak | – | Lista zdefiniowanych zmiennych NetVar. |
-| `sensors` | Nie | – | Mapowanie zmiennych numerycznych na sensory (tylko `read`). |
-| `binary_sensors` | Nie | – | Mapowanie zmiennych BOOL na binary_sensor (tylko `read`). |
-| `text_sensors` | Nie | – | Mapowanie zmiennych STRING na text_sensor (tylko `read`). Zmienne czasowe (TIME, DATE, TIME_OF_DAY, DATE_AND_TIME) pokazują tekst IEC (patrz „Typy czasowe”). |
-| `switches` | Nie | – | Mapowanie zmiennych BOOL na switch (tylko `write`). Opcje: `restore_value` (domyślnie `false`) i `initial_value`. |
-| `numbers` | Nie | – | Mapowanie zmiennych numerycznych (lub STRING) na number (tylko `write`). Wymaga `min_value` i `max_value`, opcjonalnie `step` (domyślnie `1`), `restore_value` (domyślnie `false`) i `initial_value`. |
-| `rejected_packets` | Nie | tworzony automatycznie | Sensor liczby odrzuconych ramek (błędna walidacja). |
-| `rx_packets` | Nie | tworzony automatycznie | Sensor liczby poprawnie odebranych ramek. |
-| `tx_packets` | Nie | tworzony automatycznie | Sensor liczby wysłanych ramek. |
-| `rx_errors` | Nie | tworzony automatycznie | Sensor liczby błędów odbioru. |
-| `tx_errors` | Nie | tworzony automatycznie | Sensor liczby błędów wysyłki. |
+| `list_id` | Tak | – | Identyfikator listy NetVar (bajty 8–9 ramki). W trybie `read` rozdziela ramki między listy współdzielące port. |
+| `mode` | Nie | `read` | `read` (odbiór) lub `write` (wysyłka). Alias: `direction`. |
+| `pack_variables` | Nie | `true` | `true`: lista pakowana (jedna ramka z wszystkimi zmiennymi). `false`: lista niepakowana (każda zmienna w osobnej ramce z `var_index`, `var_count = 1`). |
+| `var_count` | Nie | liczba zmiennych | Lista pakowana: liczba zmiennych na liście NetVar (bajty 12–13). Może być **większa** niż liczba zdefiniowanych zmiennych (część zmiennych listy jest pomijana), ale nie mniejsza. W liście niepakowanej ignorowana. |
+| `payload_size` | Nie | – | Tylko lista pakowana: dokładny rozmiar ładunku w bajtach (nie mniejszy niż wynika z offsetów, max 1452). Przy odbiorze ramka o innym rozmiarze ładunku jest odrzucana; bez tej opcji akceptowane są ramki dłuższe. Przy wysyłce określa rozmiar ładunku. |
+| `on_change` | Nie | `false` | Wysyłaj przy zmianie wartości (`write`). Patrz „Wysyłanie”. Alias: `send_on_change`. |
+| `min_interval` | Nie | `500ms` | Minimalny odstęp między wysyłkami przy `on_change` (osobno dla każdej ramki: listy albo zmiennej). Liczba bez jednostki oznacza milisekundy; można podać też `"500ms"`, `"1s"`, `"2min"`. |
+| `update_interval` | Nie | `5s` | Cykliczna wysyłka całej listy (`write`). `0`, `0s` albo `never` wyłącza. Liczba bez jednostki oznacza sekundy. W trybie `read` jest ignorowany. |
+| `timeout` | Nie | `0s` | Tylko `read`: po tym czasie bez ramki encje zmiennej przechodzą w stan „unknown” (patrz „Timeout odbioru”). Liczba bez jednostki oznacza sekundy. `0` wyłącza. |
+| `require_values` | Nie | `false` | Tylko `write`, lista pakowana: nie wysyłaj listy, dopóki **każda** zmienna nie ma wartości (patrz „Wartości początkowe i przywracanie”). W liście niepakowanej użycie jest błędem: służy do tego `require_value` przy zmiennych. |
+| `variables` | Tak | – | Lista zmiennych z encjami. |
 
-### Definicja zmiennych
+### Parametry zmiennej
 
-Każda zmienna w sekcji `variables` wymaga:
+| Opcja | Dotyczy | Opis |
+|-------|---------|------|
+| `name` | wszystkie | Nazwa zmiennej i encji (unikalna w obrębie listy). |
+| `unique_id` | wszystkie | Stabilny identyfikator zmiennej (domyślnie wyznaczany z nazwy: małe litery, cyfry i `_`). Używany m.in. do przywracania stanu (`restore_value`), więc zmiana nazwy encji nie gubi zapisanego stanu, oraz w lambdach (`set_variable_value("unique_id", ...)`). Powtórzony `unique_id` w liście jest błędem. |
+| `entity` | wszystkie | `sensor`, `binary_sensor` (lista `read`), `switch`, `number` (lista `write`). |
+| `type` | wszystkie | Typ NetVar (tabela typów). Zgodność typ–encja: BOOL tylko `binary_sensor`/`switch`, pozostałe typy `sensor`/`number`. |
+| `length` | STRING | Długość tekstu w znakach (1..255), domyślnie 80. |
+| `offset` | wszystkie | Pozycja w ładunku w bajtach (0–1451). Alias: `byte_offset`. **Lista pakowana:** wymagany (w `read` pozwala pominąć wybrane zmienne, w `write` bajty bez zmiennej pozostają zerami). **Lista niepakowana:** opcjonalny, to tylko miejsce w buforze (domyślnie za poprzednimi zmiennymi). |
+| `index` | lista niepakowana | Numer zmiennej w liście sterownika (bajty 10–11). Domyślnie kolejna wolna liczba od `0`; powtórzony `index` jest błędem. |
+| `format` | `sensor` typu TIME, DATE, TOD, DT | `text` (domyślnie): tekst IEC, `raw`: surowa liczba. |
+| `initial_value` | `switch`, `number` | Wartość początkowa bufora i encji. Podanie go jawnie oznacza też, że zmienna „ma wartość” od startu. |
+| `restore_value` | `switch`, `number` | `true`: po restarcie przywracany jest ostatni stan encji i wysyłany do PLC. Domyślnie `false`. |
+| `require_value` | zmienne listy `write` niepakowanej | Nie wysyłaj tej zmiennej, dopóki nie ma wartości. W liście pakowanej jest błędem (użyj `require_values` listy). |
+| `min`, `max`, `step` | `number` | Zakres i krok. Dla typów całkowitych domyślnie zakres typu (nie może go przekraczać), dla `REAL` i `STRING` `min` i `max` są wymagane; `step` domyślnie `1`. Aliasy: `min_value`, `max_value`. |
+| `zero_as_unavailable` | `sensor` | Zero jest publikowane jako „unknown”. |
+| `device_class`, `state_class`, `unit_of_measurement`, `icon`, `entity_category`, `force_update` | wg schematu encji | Jak w ESPHome (nazwy takie same jak w Home Assistant). |
+| `suggested_display_precision` | `sensor` | Liczba miejsc po przecinku (w ESPHome: `accuracy_decimals`, nie podawaj obu). |
+| `enabled_by_default` | wszystkie | `false` = encja domyślnie wyłączona (w ESPHome: `disabled_by_default`, odwrotnie; nie podawaj obu). |
+| `inverted` | `binary_sensor`, `switch` | Odwraca wartość BOOL (dla `binary_sensor` jako filtr `invert`, dla `switch` natywne `inverted`). |
+| `mode` | `number` | Sposób wyświetlania: `auto`, `box`, `slider`. |
 
-- `name` – nazwa zmiennej (unikalna w obrębie listy).
-- `type` – typ NetVar (np. `BOOL`, `UINT`, `REAL`, `STRING(20)`).
-- `byte_offset` – offset w bajtach w ładunku (0–1451); alias: `offset` (nazwa używana w integracji Home Assistant). **Lista pakowana:** pole wymagane; w trybie `read` pozwala pominąć odczyt wybranych zmiennych (luki w ładunku), w trybie `write` bajty bez zmiennej pozostają zerami. **Lista niepakowana:** opcjonalny, to tylko miejsce w buforze komponentu (domyślnie bezpośrednio za poprzednimi zmiennymi).
-
-Pola dodatkowe:
-
-- `index` – tylko lista niepakowana: numer zmiennej w liście sterownika (bajty 10–11 ramki). Domyślnie kolejna wolna liczba od `0`; powtórzony `index` jest błędem. W liście pakowanej jest ignorowany.
-- `require_value` – tylko lista `write` niepakowana: nie wysyłaj tej zmiennej, dopóki nie ma wartości (patrz „Wartości początkowe i przywracanie”).
+Oprócz parametrów wspólnych zmienna przyjmuje **wszystkie parametry schematu encji ESPHome** danego rodzaju, np. `filters`, `on_value`, `on_raw_value`, `internal`, `web_server`, `accuracy_decimals`, `disabled_by_default`, `device_id` (dla `sensor`, `text_sensor`, `binary_sensor`, `switch`, `number`). Dla STRING i typów czasowych z `format: text` ESPHome tworzy `text_sensor`, więc obowiązuje jego schemat.
 
 Układ pamięci jest sprawdzany raz, podczas walidacji konfiguracji (Python). Nakładające się zmienne i przekroczenie 1452 bajtów ładunku powodują błąd konfiguracji.
+
+W lambdach zmienną wskazuje się przez `unique_id`, np. `id(plc_zapis).set_variable_value("temp_zadana", 21.5);`.
 
 ### Przykłady konfiguracji
 
@@ -110,107 +130,91 @@ Układ pamięci jest sprawdzany raz, podczas walidacji konfiguracji (Python). Na
 
 ```yaml
 wago_netvar:
-  id: wago_read
-  ip_address: "0.0.0.0"        # Akceptuj pakiety z dowolnego IP
-  port: 1202
-  list_id: 10
-  var_count: 6                 # lista w sterowniku ma 6 zmiennych, tu odczytujemy tylko 3
-  direction: read
-  variables:
-    - name: "temp"
-      type: "REAL"
-      byte_offset: 0
-    - name: "status"
-      type: "BOOL"
-      byte_offset: 4
-    - name: "alarm"
-      type: "BOOL"
-      byte_offset: 5
-  sensors:
-    - variable: "temp"
-      name: "Temperatura"
-      unit_of_measurement: "°C"
-  binary_sensors:
-    - variable: "status"
-      name: "Status pracy"
-  rejected_packets:
-    name: "Odrzucone ramki"    # opcjonalnie: własna nazwa/ustawienia sensora statystyk
+  - ip_address: "0.0.0.0"       # akceptuj pakiety z dowolnego IP
+    port: 1202
+    list_id: 10
+    mode: read
+    var_count: 6                # lista w sterowniku ma 6 zmiennych, tu odczytujemy tylko 3
+    timeout: 30s                # po 30 s bez ramki encje przechodzą w stan "unknown"
+    variables:
+      - name: "Temperatura"
+        unique_id: temperatura
+        offset: 0
+        type: REAL
+        entity: sensor
+        device_class: temperature
+        state_class: measurement
+        unit_of_measurement: "°C"
+        suggested_display_precision: 1
+      - name: "Pompa pracuje"
+        offset: 4
+        type: BOOL
+        entity: binary_sensor
+        device_class: running
+      - name: "Komunikat"
+        offset: 6               # bajty 5 pomijamy
+        type: STRING
+        length: 20
+        entity: sensor          # STRING w liście read: ESPHome tworzy text_sensor
 ```
 
 #### Przykład 1b: Dwie listy odczytu na tym samym porcie
 
 ```yaml
 wago_netvar:
-  - id: wago_read_100
-    ip_address: "192.168.1.50"
-    port: 1202
+  - ip_address: "0.0.0.0"
     list_id: 100
-    direction: read
+    mode: read
     variables:
-      - name: "temp"
-        type: "REAL"
-        byte_offset: 0
-    sensors:
-      - variable: "temp"
-        name: "Temperatura"
-
-  - id: wago_read_101
-    ip_address: "192.168.1.50"
-    port: 1202                 # ten sam port co lista 100 – nie koliduje, ramki rozdziela list_id
-    list_id: 101
-    direction: read
+      - {name: "Licznik A", offset: 0, type: UDINT, entity: sensor}
+  - ip_address: "0.0.0.0"
+    list_id: 101               # ten sam port 1202, inny list_id: jedno wspólne gniazdo
+    mode: read
     variables:
-      - name: "pressure"
-        type: "REAL"
-        byte_offset: 0
-    sensors:
-      - variable: "pressure"
-        name: "Ciśnienie"
+      - {name: "Licznik B", offset: 0, type: UDINT, entity: sensor}
 ```
 
-#### Przykład 2: Zapis (write) z wysyłką przy zmianie
+#### Przykład 2: Zapis (write) z wysyłką przy zmianie i cyklicznie
 
 ```yaml
 wago_netvar:
-  id: wago_write
-  ip_address: "192.168.1.50"   # Adres sterownika WAGO
-  port: 1202
-  list_id: 20
-  direction: write
-  on_change: true
-  min_interval: "1000ms"
-  update_interval: "5s"
-  variables:
-    - name: "setpoint"
-      type: "REAL"
-      byte_offset: 0
-    - name: "pump_on"
-      type: "BOOL"
-      byte_offset: 4
-  switches:
-    - variable: "pump_on"
-      name: "Pompa"
-  numbers:
-    - variable: "setpoint"
-      name: "Nastawa temperatury"
-      min_value: 0
-      max_value: 100
-      step: 0.5
+  - id: plc_zapis
+    ip_address: "192.168.17.45"
+    list_id: 124
+    mode: write
+    on_change: true            # wysyłaj po zmianie wartości
+    min_interval: 200ms        # ale nie częściej niż co 200 ms
+    update_interval: 30s       # oraz cyklicznie co 30 s
+    variables:
+      - name: "Pompa"
+        unique_id: pompa
+        offset: 0
+        type: BOOL
+        entity: switch
+        restore_value: true
+      - name: "Temperatura zadana"
+        unique_id: temp_zadana
+        offset: 1
+        type: REAL
+        entity: number
+        min: 5
+        max: 35
+        step: 0.5
+        initial_value: 20
+        restore_value: true
+        unit_of_measurement: "°C"
 ```
 
 #### Przykład 3: Wysyłka broadcast
 
 ```yaml
 wago_netvar:
-  id: wago_broadcast
-  ip_address: "255.255.255.255"
-  port: 1202
-  list_id: 30
-  direction: write
-  variables:
-    - name: "heartbeat"
-      type: "BOOL"
-      byte_offset: 0
+  - ip_address: "255.255.255.255"
+    list_id: 200
+    mode: write
+    update_interval: 5s
+    variables:
+      - {name: "Licznik", offset: 0, type: UDINT, entity: number, min: 0, max: 4294967295}
 ```
 
 #### Przykład 4: Zapis z lambdy
@@ -220,11 +224,9 @@ interval:
   - interval: 10s
     then:
       - lambda: |-
-          id(wago_write).set_variable_value("setpoint", 21.5f);
-          id(wago_write).set_variable_value("pump_on", true);
+          id(plc_zapis).set_variable_value("temp_zadana", 21.5);
+          id(plc_zapis).set_variable_value("pompa", true);
 ```
-
-Dostępne przeciążenia `set_variable_value(nazwa, wartość)`: `bool`, dowolny typ arytmetyczny (`int`, `uint32_t`, `float`, `double`, …), `std::string` oraz `const char *`. `get_variable_value(nazwa)` zwraca ostatnią wartość zmiennej jako tekst.
 
 #### Przykład 5: Lista niepakowana (odczyt i zapis)
 
@@ -232,78 +234,45 @@ Lista niepakowana odpowiada ustawieniu w sterowniku „Pack variables” wyłąc
 
 ```yaml
 wago_netvar:
-  - id: plc_niepakowana_odczyt
-    ip_address: "192.168.17.45"
+  - ip_address: "192.168.17.45"
     list_id: 131
-    direction: read
+    mode: read
     pack_variables: false
     variables:
-      - name: temp_zadana
-        type: INT
-        index: 2        # numer zmiennej w liście sterownika
-      - name: temp_aktualna
-        type: INT
-        index: 9
-    sensors:
-      - name: "Temperatura zadana"
-        variable: temp_zadana
-      - name: "Temperatura aktualna"
-        variable: temp_aktualna
+      - {name: "Temperatura zadana", index: 2, type: INT, entity: sensor}     # index = numer w liście sterownika
+      - {name: "Temperatura aktualna", index: 9, type: INT, entity: sensor}
 
-  - id: plc_niepakowana_zapis
-    ip_address: "192.168.17.45"
+  - ip_address: "192.168.17.45"
     list_id: 132
-    direction: write
+    mode: write
     pack_variables: false
-    on_change: true
+    on_change: true            # wysyłana jest tylko zmieniona zmienna
     variables:
-      - name: pompa
-        type: BOOL
-        require_value: true   # nie wysyłaj, dopóki pompa nie ma wartości
-      - name: nastawa
-        type: INT
-    switches:
       - name: "Pompa"
-        variable: pompa
+        type: BOOL
+        entity: switch
+        require_value: true    # nie wysyłaj, dopóki pompa nie ma wartości
         restore_value: true
-    numbers:
       - name: "Nastawa"
-        variable: nastawa
-        min_value: 0
-        max_value: 100
+        type: INT
+        entity: number
+        min: 0
+        max: 100
         initial_value: 20
 ```
 
-#### Przykład 6: Odczyt z timeoutem i typami czasowymi
+#### Przykład 6: Typy czasowe
 
 ```yaml
 wago_netvar:
-  - id: plc_czas
-    ip_address: "192.168.17.45"
+  - ip_address: "192.168.17.45"
     list_id: 140
-    direction: read
-    timeout: 30s            # po 30 s bez ramki encje przechodzą w stan "unknown"
+    mode: read
     variables:
-      - name: data_czas
-        type: DT
-        byte_offset: 0
-      - name: czas_pracy
-        type: TIME
-        byte_offset: 4
-      - name: licznik
-        type: UDINT
-        byte_offset: 8
-    text_sensors:
-      - name: "Zegar PLC"           # np. DT#2026-11-08-12:34:56
-        variable: data_czas
-      - name: "Czas pracy"          # np. T#1d2h3m4s500ms
-        variable: czas_pracy
-    sensors:
-      - name: "Licznik"             # zmienna liczbowa jako surowa liczba
-        variable: licznik
+      - {name: "Zegar PLC", offset: 0, type: DT, entity: sensor}                       # tekst, np. DT#2026-11-08-12:34:56
+      - {name: "Czas pracy", offset: 4, type: TIME, entity: sensor}                    # tekst, np. T#1d2h3m4s500ms
+      - {name: "Czas cyklu [ms]", offset: 8, type: TIME, entity: sensor, format: raw}  # surowa liczba milisekund
 ```
-
-Jedna zmienna może mieć tylko jedną encję: `variable` nie może powtórzyć się między `sensors` i `text_sensors`.
 
 #### Przykład 7: Wysyłka na żądanie (akcja `wago_netvar.send`)
 
@@ -318,7 +287,23 @@ button:
 #   id(plc_zapis).send_now();
 ```
 
-Akcja wysyła listę niezależnie od `on_change` i `update_interval`, ale respektuje `require_value(s)`.
+Akcja wysyła listę (w liście niepakowanej: wszystkie zmienne) niezależnie od `on_change` i `update_interval`, ale respektuje `require_value(s)`.
+
+## Wysyłanie (`on_change`, `min_interval`, `update_interval`)
+
+Lista `write` jest wysyłana w dwóch niezależnych trybach, które można włączyć osobno albo razem:
+
+| Ustawienie | Zachowanie |
+|------------|------------|
+| tylko `on_change: true` (`update_interval: never`) | Ramka jest wysyłana po zmianie wartości. Pierwsza wysyłka nie jest ograniczona; kolejna nie wcześniej niż `min_interval` po poprzedniej. Zmiana w trakcie odstępu jest wysyłana dopiero po jego upływie, a kilka zmian w tym czasie trafia do jednej ramki (ostatnie wartości). Ustawienie tej samej wartości nie jest zmianą i niczego nie wysyła. `min_interval: 0` wysyła każdą zmianę w następnej iteracji pętli. |
+| tylko `update_interval` (`on_change: false`) | Co `update_interval` wysyłana jest cała lista (w liście niepakowanej: wszystkie zmienne), niezależnie od zmian. Zmiany same niczego nie wysyłają. |
+| oba | Cykliczna wysyłka niesie aktualne wartości, czyli także niewysłane zmiany, i zeruje ich oczekiwanie. Każda wysyłka (także cykliczna) liczy się jako „poprzednia” dla `min_interval`, więc zmiana tuż po wysyłce cyklicznej czeka do upływu `min_interval`. |
+
+**Lista pakowana:** zmiana dowolnej zmiennej powoduje wysłanie całej listy (jedna ramka); `min_interval` i `sequence_counter` dotyczą listy.
+
+**Lista niepakowana:** po zmianie wysyłana jest **tylko ta zmienna, która zmieniła wartość** (własna ramka), a `min_interval` jest liczony osobno dla każdej zmiennej (zmiany różnych zmiennych nie opóźniają się wzajemnie). Każda zmienna ma własny `sequence_counter` (bajty 16–17), zwiększany przy każdej wysłanej ramce tej zmiennej.
+
+Nieudana wysyłka (błąd gniazda) jest ponawiana najwyżej raz na `min_interval` i liczona w `tx_errors`. Blokady `require_value(s)` opisano w „Wartości początkowe i przywracanie”.
 
 ## Wartości początkowe i przywracanie
 
@@ -336,7 +321,7 @@ Domyślnie (bez `restore_value` i `initial_value`) bufor po starcie zawiera zera
 
 Powód różnicy: lista pakowana jest wysyłana jako jedna ramka, więc blokada musi dotyczyć całej listy, a lista niepakowana składa się z niezależnych ramek.
 
-Zmienne bez encji (ustawiane lambdą) mają wartość od pierwszego `set_variable_value()`. Blokada jest zgłaszana w logu jednorazowo (ostrzeżenie).
+Zmienna ustawiona lambdą (`set_variable_value()`) ma wartość od pierwszego wywołania. Blokada jest zgłaszana w logu jednorazowo (ostrzeżenie).
 
 ## Timeout odbioru
 
@@ -344,7 +329,7 @@ Dotyczy list `read` z opcją `timeout`. Gdy przez podany czas nie nadejdzie ramk
 
 ## Typy czasowe
 
-Zmienne TIME, DATE, TIME_OF_DAY (TOD) i DATE_AND_TIME (DT) można mapować na `sensor` (surowa liczba: ms albo sekundy) lub na `text_sensor` (tekst w zapisie IEC 61131-3, taki sam jak w integracji HA):
+Zmienne TIME, DATE, TIME_OF_DAY (TOD) i DATE_AND_TIME (DT) w encji `sensor` są domyślnie pokazywane jako tekst w zapisie IEC 61131-3 (`format: text`, ESPHome tworzy wtedy `text_sensor`, taki sam jak w integracji HA). Z `format: raw` sensor pokazuje surową liczbę (ms albo sekundy). Zapis zmiennych czasowych odbywa się surową liczbą przez `number`.
 
 | Typ | Surowa wartość | Przykład tekstu |
 |-----|----------------|-----------------|
@@ -353,7 +338,7 @@ Zmienne TIME, DATE, TIME_OF_DAY (TOD) i DATE_AND_TIME (DT) można mapować na `s
 | TIME_OF_DAY | milisekundy od północy | `TOD#12:34:56`, `TOD#12:34:56.789` (milisekundy tylko gdy niezerowe) |
 | DATE_AND_TIME | sekundy od 1970-01-01 | `DT#2026-11-08-12:34:56` |
 
-DATE i DT są wyświetlane bez przeliczania strefy czasowej (tak, jak je przechowuje sterownik). Zapis zmiennych czasowych odbywa się surową liczbą przez `number`.
+DATE i DT są wyświetlane bez przeliczania strefy czasowej (tak, jak je przechowuje sterownik).
 
 ## Walidacja ramek (tryb read)
 
@@ -362,6 +347,7 @@ Wszystkie listy `read` na jednym porcie korzystają z jednego gniazda. Każdy da
 - adresu IP nadawcy (jeśli `ip_address` różne od `0.0.0.0`),
 - portu docelowego (niejawnie przez bindowanie gniazda UDP do `port`),
 - magic bytes (bajty 0–3),
+- message_type (bajty 4–7) równy `0` (dane zmiennych; potwierdzenia, prośby bootup i SDO są odrzucane),
 - list_ID (bajty 8–9),
 - frame_size (bajty 14–15) zgodnie z rozmiarem otrzymanego pakietu,
 - **lista pakowana:** `var_index = 0`, var_count (bajty 12–13) zgodny z konfiguracją, rozmiar ładunku obejmujący wszystkie zdefiniowane zmienne (ramka może być dłuższa – zmienne za ostatnią zdefiniowaną są pomijane; z opcją `payload_size` rozmiar musi być dokładny),
@@ -372,19 +358,20 @@ Zliczanie odrzuconych ramek (`rejected_packets`) przy współdzielonym porcie:
 - ramka, której nie da się przypisać do listy (za duża, za krótka, błędne magic bytes) lub o `list_id`, którego żadna lista tego portu nie obsługuje – jest zliczana na wszystkich listach `read` tego portu,
 - ramka o `list_id` obsługiwanym przez listy tego portu, której żadna z nich nie przyjęła (np. zły adres nadawcy, `var_count`, `frame_size`) – jest zliczana tylko na listach o tym `list_id`.
 
-Pola sequence_counter (bajty 16–17) oraz checksum (bajty 18–19) są odczytywane, ale nie walidowane. Przy wysyłce checksum jest zerowane. Każda ramka, która przejdzie walidację, jest w całości dekodowana i publikowana do zmapowanych encji; pozostałe są liczone w `rejected_packets`.
+Pola sequence_counter (bajty 16–17), flags (bajt 18) i checksum (bajt 19) są odczytywane, ale nie walidowane. Przy wysyłce flags i checksum są zerowane. Ramki o `message_type` różnym od `0` zwiększają `rejected_packets` (np. prośby bootup, które sterownik rozsyła po restarcie). Każda ramka, która przejdzie walidację, jest w całości dekodowana i publikowana do zmapowanych encji; pozostałe są liczone w `rejected_packets`.
 
 ## Automatyczne sensory statystyk
 
-Dla każdej listy komponent automatycznie tworzy (kategoria encji: diagnostyczna) sensory z licznikami, nazwane `<id listy> <opis>`. Podanie w YAML klucza o tej samej nazwie pozwala zmienić nazwę i pozostałe ustawienia sensora:
+Sensory diagnostyczne tworzone są automatycznie (kategoria encji: diagnostyczna), nazwy zawierają `list_id`:
 
-- `rejected_packets` – ramki odrzucone przy walidacji (w tym zbyt duże datagramy),
-- `rx_packets` – poprawnie odebrane ramki,
-- `tx_packets` – wysłane ramki,
-- `rx_errors` – błędy odbioru (błąd gniazda),
-- `tx_errors` – błędy wysyłki.
+| Lista | Sensory |
+|-------|---------|
+| `read` | `rx_packets_<list_id>` (poprawnie odebrane ramki), `rx_errors_<list_id>` (błędy odbioru, błąd gniazda), `rejected_packets_<list_id>` (ramki odrzucone przy walidacji, w tym zbyt duże datagramy) |
+| `write` | `tx_packets_<list_id>` (wysłane ramki; w liście niepakowanej każda zmienna to osobna ramka), `tx_errors_<list_id>` (błędy wysyłki) |
 
-Wartości są publikowane co najwyżej raz na sekundę i tylko po zmianie.
+Dodatkowo powstaje jeden zestaw sum po wszystkich listach: `total_rx_packets`, `total_rx_errors`, `total_rejected_packets`, `total_tx_packets`, `total_tx_errors` (suma liczników wszystkich list; sensory należą do pierwszej listy w konfiguracji). Gdy dwie listy tego samego kierunku mają ten sam `list_id`, do nazwy drugiej dopisywany jest adres IP (np. `rx_packets_124_10_0_0_9`).
+
+Wartości są publikowane co najwyżej raz na sekundę i tylko po zmianie. Nazw ani ustawień tych sensorów nie można zmieniać w YAML.
 
 ## Uwagi dotyczące typów danych i konwersji
 
@@ -395,7 +382,7 @@ Wartości są publikowane co najwyżej raz na sekundę i tylko po zmianie.
 - Tekst zapisywany do zmiennej liczbowej musi być w całości poprawną liczbą (np. `12abc` jest odrzucane). Dla BOOL akceptowane są: `1/0`, `true/false`, `on/off`, `yes/no` (bez rozróżniania wielkości liter).
 - **Ograniczenie precyzji:** sensory i number ESPHome używają liczb `float` (24 bity mantysy). Wartości typów 32-bitowych (DWORD, UDINT, DINT, TIME, DATE, TIME_OF_DAY, DATE_AND_TIME) powyżej 16 777 216 są w encji `sensor` zaokrąglane (np. UDINT `16777217` pokaże `16777216`). Typy BOOL, BYTE, USINT, SINT, WORD, UINT, INT oraz REAL (32-bitowy float) nie są tym dotknięte. Pełną wartość można odczytać w lambdzie przez `get_variable_value()`, a dla typów czasowych pełną dokładność daje `text_sensor`. Integracja Home Assistant nie ma tego ograniczenia (liczby całkowite są dokładne).
 - Nieskończona lub nieliczbowa wartość REAL (NaN/Inf) jest publikowana jako NaN (stan „unknown”).
-- Offsety zmiennych (`byte_offset`) w liście pakowanej zawsze podaje się ręcznie – w trybie `read` pozwala to pominąć odczyt niektórych zmiennych (luki w ładunku), w trybie `write` odwzorować układ listy zmiennych sterownika.
+- Offsety zmiennych (`offset`) w liście pakowanej zawsze podaje się ręcznie – w trybie `read` pozwala to pominąć odczyt niektórych zmiennych (luki w ładunku), w trybie `write` odwzorować układ listy zmiennych sterownika.
 - W trybie `write` bufor po starcie zawiera zera, o ile zmienna nie ma `initial_value` ani przywróconego stanu. Patrz „Wartości początkowe i przywracanie” (opcje `restore_value`, `require_value(s)`).
 - Wysyłka i odbiór działają dopiero po uzyskaniu połączenia sieciowego; gniazdo UDP jest otwierane automatycznie (z ponawianiem co 5 s, także po błędzie odbioru).
 
@@ -405,28 +392,23 @@ Komponent działa zarówno na Arduino, jak i ESP-IDF. Warstwa transportu UDP jes
 
 ## Różnice względem integracji Home Assistant
 
-Obie implementacje stosują te same reguły ramki, walidacji (w tym zliczania `rejected_packets`) i konwersji wartości. Różnice wynikają z platform:
+Konfiguracja listy i zmiennych (nazwy, domyślne wartości, reguły) jest taka sama w obu platformach, a ramki, walidacja (w tym `rejected_packets`), konwersje wartości, `on_change`/`min_interval`/`update_interval`, restore i blokady wysyłki działają tak samo. Pozostałe różnice wynikają z platform:
 
 | Obszar | ESPHome | Home Assistant |
 |--------|---------|----------------|
-| Konfiguracja | YAML ESPHome, zmienne i encje w jednym bloku | ręczny YAML w `configuration.yaml`, bez interfejsu graficznego |
-| Kierunek listy | `direction: read/write` (alias `mode`) | `mode: read/write` (alias `direction`) |
-| Wysyłka przy zmianie | `on_change: true/false` | `on_change: true/false` |
-| Offset zmiennej | `byte_offset` (alias `offset`) | `offset` (alias `byte_offset`) |
-| Jednostki czasu | tekst z jednostką: `"500ms"`, `"5s"` | tekst z jednostką (`"500ms"`, `"5s"`, `"2min"`, `"never"`) albo liczba: `min_interval` w ms, `update_interval` i `timeout` w s |
-| Typ encji | `sensors`, `binary_sensors`, `text_sensors`, `switches`, `numbers` | pole `entity` przy każdej zmiennej |
-| STRING | odczyt: `text_sensor`, zapis: `number` | odczyt: `sensor`, zapis: `number` |
-| Typy czasowe jako tekst IEC | `text_sensor` (surowa liczba: `sensor`) | `sensor` z `format: text` (domyślnie) albo `format: raw` |
-| Listy niepakowane (`pack_variables: false`) | obsługiwane | obsługiwane |
-| `payload_size`, `timeout`, `require_values`, `require_value`, `initial_value`, `restore_value` | obsługiwane | obsługiwane |
+| Identyfikator listy | opcjonalne `id` (do lambd i akcji) | brak |
+| Dodatkowe parametry encji | cały schemat encji ESPHome (`filters`, `on_value`, `internal`, `web_server`, ...) | `visible_by_default`, `suggested_unit_of_measurement` |
 | Wysyłka na żądanie | akcja `wago_netvar.send` lub `send_now()` | usługa `wago_netvar.send_list` |
-| Przywracanie stanu | pamięć nieulotna ESPHome (`restore_value`) | `RestoreEntity` Home Assistant (`restore_value`) |
-| Port lokalny listy `write` | port przydzielony przez system | port przydzielony przez system (osobne gniazdo wysyłające) |
-| Własny broadcast na ten sam port | nie dotyczy (inne urządzenie) | rozpoznawany i pomijany przez listy `read` |
+| Przywracanie stanu | pamięć nieulotna ESPHome (klucz: `unique_id`) | `RestoreEntity` Home Assistant |
 | Precyzja liczb 32-bitowych | `float` (do 16 777 216 dokładnie) | dokładna (liczby całkowite Pythona) |
 | REAL będący NaN/Inf przy odbiorze | stan „unknown” (NaN) | ramka przyjęta, stan encji bez zmian, `rx_errors` +1 |
+| Własny broadcast na ten sam port | nie dotyczy (inne urządzenie) | rozpoznawany i pomijany przez listy `read` |
+| Walidacja konfiguracji | błąd odrzuca całą konfigurację (kompilacja) | błędna lista jest pomijana, reszta działa |
+| Stan „niedostępny” po `timeout` | `unknown` (`binary_sensor`/`text_sensor`: o ile wersja ESPHome ma `invalidate_state()`) | `unavailable` |
 
 ## Zmiany
+
+- Ramki z typem wiadomości (bajty 4–7, w dokumentacji 3S pole „ID”) różnym od `0` są odrzucane i liczone w `rejected_packets`; opis pól 4–7 i 18–19 ujednolicono z dokumentacją protokołu.
 
 - Opcja `send_on_change` została przemianowana na `on_change` (zgodnie z założeniami projektu i integracją HA); stara nazwa działa jako alias.
 - Odczyt STRING: bajty spoza ASCII są zamieniane na `?`.
@@ -434,3 +416,9 @@ Obie implementacje stosują te same reguły ramki, walidacji (w tym zliczania `r
 - Dodano listy niepakowane (`pack_variables: false`, `index`), opcje `payload_size`, `timeout`, `require_values`, `require_value`, `initial_value`, `restore_value`, akcję `wago_netvar.send` oraz tekstowy zapis typów czasowych (`text_sensor`). Przy ramkach pakowanych sprawdzane jest teraz `var_index = 0` (zgodnie z integracją HA).
 - Aliasy nazw zgodne z integracją HA: `mode` (= `direction`) i `offset` (= `byte_offset`).
 - Opis ograniczenia precyzji liczb 32-bitowych (sekcja „Uwagi dotyczące typów danych i konwersji”).
+- **Ujednolicona konfiguracja z integracją HA (zmiana niezgodna wstecz):** rodzaj encji podaje się przy zmiennej (`entity`), usunięto listy `sensors`, `binary_sensors`, `text_sensors`, `switches`, `numbers` i pole `variable`. Nazwy parametrów są takie same jak w HA: `mode` (zamiast `direction`, domyślnie `read`), `offset`, `type` + `length`, `min`/`max`/`step`, `suggested_display_precision`, `enabled_by_default`, `unique_id`, `inverted`, `zero_as_unavailable`; `list_id` jest wymagane, `id` opcjonalne. Dotychczasowe nazwy `direction`, `byte_offset`, `min_value`/`max_value`, `send_on_change` działają jako aliasy.
+- Zmienna w lambdach jest wskazywana przez `unique_id` (domyślnie slug nazwy).
+- Typy czasowe w `sensor` są domyślnie tekstem IEC (`format: text`); surowa liczba przez `format: raw`.
+- `on_change` w liście niepakowanej wysyła tylko zmienioną zmienną; `min_interval` jest liczony osobno dla każdej zmiennej, a `sequence_counter` osobno dla każdej zmiennej (lista pakowana: jeden na listę). Ustawienie tej samej wartości nie wywołuje wysyłki.
+- Sensory statystyk: `rx_packets_<list_id>`, `rx_errors_<list_id>`, `rejected_packets_<list_id>` dla list `read` oraz `tx_packets_<list_id>`, `tx_errors_<list_id>` dla list `write`; sumy `total_*`. Klucze `rx_packets`, `tx_packets` itd. w YAML zostały usunięte.
+- Nowe parametry zmiennej: `zero_as_unavailable`, `inverted`, `suggested_display_precision`, `enabled_by_default`.
