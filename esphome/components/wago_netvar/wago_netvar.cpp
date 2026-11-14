@@ -395,6 +395,14 @@ template<typename T> auto invalidate_entity(T *entity, int) -> decltype(entity->
 }
 template<typename T> void invalidate_entity(T *, long) {}
 
+// Jak wyżej: has_state() jest używane tylko tam, gdzie encja je udostępnia.
+template<typename T> auto source_has_state(T *entity, int) -> decltype(entity->has_state(), bool()) {
+  return entity->has_state();
+}
+template<typename T> bool source_has_state(T *, long) {
+  return false;
+}
+
 std::string to_lower(std::string text) {
   for (auto &c : text)
     c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -426,6 +434,11 @@ void publish_counter(sensor::Sensor *sensor, uint32_t value, uint32_t &last_publ
 void WagoSwitch::write_state(bool state) {
   if (this->parent_ == nullptr)
     return;
+  if (this->parent_->is_read_list()) {  // lista read: wartość pochodzi z PLC
+    ESP_LOGW(TAG, "Switch '%s' belongs to a read list: command ignored", this->var_name_.c_str());
+    this->parent_->republish_variable(this->var_name_);
+    return;
+  }
   this->parent_->set_variable_value(this->var_name_, state);
   this->parent_->save_restore_value(this->var_name_, state ? 1.0f : 0.0f);
   this->publish_state(state);
@@ -434,6 +447,11 @@ void WagoSwitch::write_state(bool state) {
 void WagoNumber::control(float value) {
   if (this->parent_ == nullptr)
     return;
+  if (this->parent_->is_read_list()) {  // lista read: wartość pochodzi z PLC
+    ESP_LOGW(TAG, "Number '%s' belongs to a read list: command ignored", this->var_name_.c_str());
+    this->parent_->republish_variable(this->var_name_);
+    return;
+  }
   this->parent_->set_variable_value(this->var_name_, value);
   this->parent_->save_restore_value(this->var_name_, value);
   this->publish_state(value);
@@ -781,6 +799,8 @@ void WagoNetVarComponent::setup() {
     this->frame_.assign(NETVAR_HEADER_SIZE + frame_payload, 0);
     this->udp_ = create_transport();
     this->apply_startup_values_();  // initial_value i restore_value; wysyłka po otwarciu gniazda w loop()
+    this->ready_ = true;            // od teraz callbacki opcji source mogą zapisywać do bufora
+    this->apply_source_states_();   // stan źródeł, które opublikowały wartość przed setup()
     // Gniazdo wysyłające jest otwierane w loop() (patrz ensure_udp_()).
   }
 }
@@ -995,8 +1015,18 @@ void WagoNetVarComponent::check_timeouts_() {
 void WagoNetVarComponent::invalidate_variable_(const VarDef &var) {
   if (var.sensor_ptr != nullptr)
     var.sensor_ptr->publish_state(NAN);  // NaN to "unknown" w ESPHome
+  if (var.number_ptr != nullptr)
+    var.number_ptr->publish_state(NAN);
   invalidate_entity(var.binary_sensor_ptr, 0);
+  invalidate_entity(var.switch_ptr, 0);
   invalidate_entity(var.text_sensor_ptr, 0);
+}
+
+// Ponowna publikacja ostatniej wartości odebranej z PLC (np. po odrzuconym poleceniu z interfejsu).
+void WagoNetVarComponent::republish_variable(const std::string &name) {
+  const VarDef *var = this->get_var(name);
+  if (var != nullptr && var->received)
+    this->publish_variable_(*var);
 }
 
 double WagoNetVarComponent::decode_number_(const VarDef &var, const uint8_t *data) const {
@@ -1024,6 +1054,8 @@ void WagoNetVarComponent::publish_variable_(const VarDef &var) {
   if (var.type == VariableType::BOOL) {
     if (var.binary_sensor_ptr != nullptr)
       var.binary_sensor_ptr->publish_state(data[0] != 0);
+    if (var.switch_ptr != nullptr && this->enable_read_)  // lista read: lustro wartości z PLC
+      var.switch_ptr->publish_state(data[0] != 0);
     return;
   }
 
@@ -1036,6 +1068,12 @@ void WagoNetVarComponent::publish_variable_(const VarDef &var) {
   // Typy czasowe: text_sensor pokazuje tekst IEC, sensor surową liczbę.
   if (var.text_sensor_ptr != nullptr && is_temporal_type(var.type))
     var.text_sensor_ptr->publish_state(format_temporal(var.type, load_le(data, var.size)));
+
+  // Lista read: number pokazuje wartość z PLC (NaN/Inf jako NaN, czyli "unknown").
+  if (var.number_ptr != nullptr && this->enable_read_) {
+    const double number_value = this->decode_number_(var, data);
+    var.number_ptr->publish_state(std::isfinite(number_value) ? static_cast<float>(number_value) : NAN);
+  }
 
   if (var.sensor_ptr == nullptr)
     return;
@@ -1214,6 +1252,10 @@ void WagoNetVarComponent::commit_(VarDef &var, const uint8_t *bytes) {
     else
       var.dirty = true;  // lista niepakowana: wysłana zostanie tylko ta zmienna
   }
+
+  // Encje sensor / binary_sensor / text_sensor listy write pokazują aktualnie zapisaną (wysyłaną) wartość.
+  if (var.sensor_ptr != nullptr || var.binary_sensor_ptr != nullptr || var.text_sensor_ptr != nullptr)
+    this->publish_variable_(var);
 }
 
 void WagoNetVarComponent::write_int64_(VarDef &var, int64_t value) {
@@ -1372,6 +1414,103 @@ void WagoNetVarComponent::apply_value_(VarDef &var, double value) {
   } else if (var.number_ptr != nullptr) {
     this->write_double_(var, value);
     var.number_ptr->publish_state(static_cast<float>(value));
+  } else if (var.binary_sensor_ptr != nullptr) {
+    this->write_int64_(var, value != 0.0 ? 1 : 0);  // stan encji publikuje commit_()
+  } else if (var.sensor_ptr != nullptr || var.text_sensor_ptr != nullptr) {
+    this->write_double_(var, value);
+  }
+}
+
+void WagoNetVarComponent::set_initial_value(const std::string &name, double value) {
+  VarDef *var = this->get_var(name);
+  if (var == nullptr) {
+    this->fail_config_("unknown variable (initial value)", name);
+    return;
+  }
+  var->has_initial = true;
+  var->initial_value = value;
+}
+
+// Opcja source: stan innej encji jest zapisywany do zmiennej (i wysyłany zgodnie z on_change / update_interval).
+// Callback może zadziałać przed zakończeniem setup(), dlatego do tego czasu jest ignorowany, a aktualny stan
+// źródła jest odczytywany w apply_source_states_().
+void WagoNetVarComponent::set_source_sensor(const std::string &name, sensor::Sensor *source) {
+  VarDef *var = this->get_var(name);
+  if (var == nullptr || source == nullptr || !is_numeric_type(var->type)) {
+    this->fail_config_("invalid source sensor", name);
+    return;
+  }
+  var->source_sensor = source;
+  source->add_on_state_callback([this, name](float value) {
+    if (this->ready_ && std::isfinite(value))
+      this->set_variable_value(name, static_cast<double>(value));
+  });
+}
+
+void WagoNetVarComponent::set_source_binary_sensor(const std::string &name, binary_sensor::BinarySensor *source) {
+  VarDef *var = this->get_var(name);
+  if (var == nullptr || source == nullptr || var->type != VariableType::BOOL) {
+    this->fail_config_("invalid source binary sensor", name);
+    return;
+  }
+  var->source_binary = source;
+  source->add_on_state_callback([this, name](bool state) {
+    if (this->ready_)
+      this->set_variable_value(name, state);
+  });
+}
+
+void WagoNetVarComponent::set_source_number(const std::string &name, number::Number *source) {
+  VarDef *var = this->get_var(name);
+  if (var == nullptr || source == nullptr || !is_numeric_type(var->type)) {
+    this->fail_config_("invalid source number", name);
+    return;
+  }
+  var->source_number = source;
+  source->add_on_state_callback([this, name](float value) {
+    if (this->ready_ && std::isfinite(value))
+      this->set_variable_value(name, static_cast<double>(value));
+  });
+}
+
+void WagoNetVarComponent::set_source_switch(const std::string &name, switch_::Switch *source) {
+  VarDef *var = this->get_var(name);
+  if (var == nullptr || source == nullptr || var->type != VariableType::BOOL) {
+    this->fail_config_("invalid source switch", name);
+    return;
+  }
+  var->source_switch = source;
+  source->add_on_state_callback([this, name](bool state) {
+    if (this->ready_)
+      this->set_variable_value(name, state);
+  });
+}
+
+void WagoNetVarComponent::set_source_text_sensor(const std::string &name, text_sensor::TextSensor *source) {
+  VarDef *var = this->get_var(name);
+  if (var == nullptr || source == nullptr || var->type != VariableType::STRING) {
+    this->fail_config_("invalid source text sensor", name);
+    return;
+  }
+  var->source_text = source;
+  source->add_on_state_callback([this, name](const std::string &text) {
+    if (this->ready_)
+      this->set_variable_value(name, text);
+  });
+}
+
+void WagoNetVarComponent::apply_source_states_() {
+  for (auto &var : this->variables_) {
+    if (var.source_sensor != nullptr && var.source_sensor->has_state() && std::isfinite(var.source_sensor->state))
+      this->set_variable_value(var.name, static_cast<double>(var.source_sensor->state));
+    if (var.source_binary != nullptr && var.source_binary->has_state())
+      this->set_variable_value(var.name, var.source_binary->state);
+    // Number i text_sensor: stan sprzed setup() tylko, gdy wersja ESPHome udostępnia has_state()
+    if (var.source_number != nullptr && source_has_state(var.source_number, 0) && std::isfinite(var.source_number->state))
+      this->set_variable_value(var.name, static_cast<double>(var.source_number->state));
+    if (var.source_text != nullptr && source_has_state(var.source_text, 0))
+      this->set_variable_value(var.name, var.source_text->state);
+    // Switch nie ma has_state(): jego stan trafia do zmiennej przy pierwszej publikacji (callback).
   }
 }
 
