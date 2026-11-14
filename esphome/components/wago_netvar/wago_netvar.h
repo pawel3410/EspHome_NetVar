@@ -108,6 +108,13 @@ struct VarDef {
   bool has_value{false};      // zmienna ma wartość: initial_value, przywrócona albo ustawiona w czasie pracy
   bool zero_as_unavailable{false};  // sensor: zero jest publikowany jako "unknown"
 
+  // Lista "write": encja sensor / binary_sensor może dostawać wartość z innej encji (opcja source)
+  sensor::Sensor *source_sensor{nullptr};
+  binary_sensor::BinarySensor *source_binary{nullptr};
+  number::Number *source_number{nullptr};
+  switch_::Switch *source_switch{nullptr};
+  text_sensor::TextSensor *source_text{nullptr};
+
   // Wysyłka (lista "write" niepakowana): każda zmienna ma własny stan zmiany, odstęp min_interval i licznik sequence
   bool dirty{false};       // wartość zmieniła się od ostatniej wysyłki (tylko przy on_change)
   bool sent_once{false};
@@ -166,6 +173,20 @@ class WagoNetVarComponent : public PollingComponent {
                        bool initial_value);
   void register_number(const std::string &name, number::Number *entity, bool restore_value, bool has_initial,
                        float initial_value);
+
+  /// Lista "write": wartość początkowa zmiennej z encją sensor / binary_sensor (switch i number ustawia register_*).
+  void set_initial_value(const std::string &name, double value);
+  /// Lista "write": wysyłaj stan podanego sensora / binary_sensora (opcja source).
+  void set_source_sensor(const std::string &name, sensor::Sensor *source);
+  void set_source_binary_sensor(const std::string &name, binary_sensor::BinarySensor *source);
+  void set_source_number(const std::string &name, number::Number *source);
+  void set_source_switch(const std::string &name, switch_::Switch *source);
+  void set_source_text_sensor(const std::string &name, text_sensor::TextSensor *source);
+
+  /// Lista "read": switch i number tylko pokazują wartość z PLC; polecenia z interfejsu są odrzucane
+  /// (encja wraca do wartości odebranej z PLC).
+  bool is_read_list() const { return this->enable_read_; }
+  void republish_variable(const std::string &name);
 
   /// Natychmiastowa wysyłka listy "write" (akcja wago_netvar.send). Respektuje require_value(s).
   void send_now();
@@ -231,6 +252,7 @@ class WagoNetVarComponent : public PollingComponent {
   bool ensure_udp_();
   const VarDef *find_by_index_(uint16_t index) const;
   void apply_startup_values_();
+  void apply_source_states_();
   void apply_value_(VarDef &var, double value);
   void mark_received_(VarDef &var);
   void check_timeouts_();
@@ -273,6 +295,7 @@ class WagoNetVarComponent : public PollingComponent {
   uint32_t timeout_ms_{0};
   bool require_values_{false};
   bool gate_warned_{false};
+  bool ready_{false};  // setup() zakończony: od tego momentu callbacki source mogą zapisywać do bufora
   bool config_error_{false};
 
   // stan
