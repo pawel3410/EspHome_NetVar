@@ -101,13 +101,14 @@ wago_netvar:
 |-------|---------|------|
 | `name` | wszystkie | Nazwa zmiennej i encji (unikalna w obrębie listy). |
 | `unique_id` | wszystkie | Stabilny identyfikator zmiennej (domyślnie wyznaczany z nazwy: małe litery, cyfry i `_`). Używany m.in. do przywracania stanu (`restore_value`), więc zmiana nazwy encji nie gubi zapisanego stanu, oraz w lambdach (`set_variable_value("unique_id", ...)`). Powtórzony `unique_id` w liście jest błędem. |
-| `entity` | wszystkie | `sensor`, `binary_sensor` (lista `read`), `switch`, `number` (lista `write`). |
+| `entity` | wszystkie | `sensor`, `binary_sensor`, `switch` albo `number`. Każdy rodzaj działa w obu rodzajach list (tabela w sekcji „Rodzaje encji w listach read i write”). |
+| `source` | `sensor`, `binary_sensor` listy `write` | Encja ESPHome, której stan jest wysyłany do PLC: `id` albo `{rodzaj: id}` (patrz „Zmienne tylko do wysyłki”). Źródłem może być `sensor`, `number`, `binary_sensor`, `switch` albo `text_sensor`, zależnie od typu zmiennej. |
 | `type` | wszystkie | Typ NetVar (tabela typów). Zgodność typ–encja: BOOL tylko `binary_sensor`/`switch`, pozostałe typy `sensor`/`number`. |
 | `length` | STRING | Długość tekstu w znakach (1..255), domyślnie 80. |
 | `offset` | wszystkie | Pozycja w ładunku w bajtach (0–1451). Alias: `byte_offset`. **Lista pakowana:** wymagany (w `read` pozwala pominąć wybrane zmienne, w `write` bajty bez zmiennej pozostają zerami). **Lista niepakowana:** opcjonalny, to tylko miejsce w buforze (domyślnie za poprzednimi zmiennymi). |
 | `index` | lista niepakowana | Numer zmiennej w liście sterownika (bajty 10–11). Domyślnie kolejna wolna liczba od `0`; powtórzony `index` jest błędem. |
 | `format` | `sensor` typu TIME, DATE, TOD, DT | `text` (domyślnie): tekst IEC, `raw`: surowa liczba. |
-| `initial_value` | `switch`, `number` | Wartość początkowa bufora i encji. Podanie go jawnie oznacza też, że zmienna „ma wartość” od startu. |
+| `initial_value` | `switch`, `number`, `sensor` i `binary_sensor` listy `write` | Wartość początkowa bufora i encji. Podanie go jawnie oznacza też, że zmienna „ma wartość” od startu. |
 | `restore_value` | `switch`, `number` | `true`: po restarcie przywracany jest ostatni stan encji i wysyłany do PLC. Domyślnie `false`. |
 | `require_value` | zmienne listy `write` niepakowanej | Nie wysyłaj tej zmiennej, dopóki nie ma wartości. W liście pakowanej jest błędem (użyj `require_values` listy). |
 | `min`, `max`, `step` | `number` | Zakres i krok. Dla typów całkowitych domyślnie zakres typu (nie może go przekraczać), dla `REAL` i `STRING` `min` i `max` są wymagane; `step` domyślnie `1`. Aliasy: `min_value`, `max_value`. |
@@ -305,6 +306,88 @@ Lista `write` jest wysyłana w dwóch niezależnych trybach, które można włą
 
 Nieudana wysyłka (błąd gniazda) jest ponawiana najwyżej raz na `min_interval` i liczona w `tx_errors`. Blokady `require_value(s)` opisano w „Wartości początkowe i przywracanie”.
 
+## Rodzaje encji w listach `read` i `write`
+
+Każdy rodzaj encji można użyć w obu rodzajach list:
+
+| Encja | Lista `read` (wartość z PLC) | Lista `write` (wartość do PLC) |
+|-------|------------------------------|--------------------------------|
+| `sensor` | pokazuje wartość z PLC | zmienna „tylko do wysyłki”: pokazuje wysyłaną wartość, która pochodzi z `source`, `initial_value` albo z innego miejsca ustawiającego zmienną |
+| `binary_sensor` | pokazuje BOOL z PLC | jak wyżej (BOOL) |
+| `switch` | lustro BOOL z PLC; polecenia z interfejsu są odrzucane | steruje wysyłaną wartością (`restore_value`, `initial_value`) |
+| `number` | lustro wartości z PLC; polecenia z interfejsu są odrzucane | steruje wysyłaną wartością (`min`, `max`, `step`, `restore_value`, `initial_value`) |
+
+STRING: w liście `read` tylko `sensor`; w liście `write` `sensor` (wartość z `source`) albo `number` (liczba zamieniana na tekst).
+
+```yaml
+wago_netvar:
+  - ip_address: "192.168.17.45"          # lista read: switch i number jako lustro wartości z PLC
+    list_id: 150
+    mode: read
+    variables:
+      - {name: "Pompa (stan z PLC)", offset: 0, type: BOOL, entity: switch}
+      - {name: "Nastawa (z PLC)", offset: 1, type: INT, entity: number, min: 0, max: 100}
+
+  - id: plc_zrodla                       # lista write: różne rodzaje źródeł
+    ip_address: "192.168.17.45"
+    list_id: 151
+    mode: write
+    on_change: true
+    variables:
+      - {name: "Nastawa z number", offset: 0, type: INT, entity: sensor, source: {number: moj_number}}
+      - {name: "Pompa z przełącznika", offset: 2, type: BOOL, entity: binary_sensor, source: {switch: moj_przelacznik}}
+      - {name: "Komunikat", offset: 3, type: STRING, length: 16, entity: sensor, source: moj_tekst}   # moj_tekst: text_sensor
+```
+
+W liście `read` `switch` i `number` nie sterują niczym: polecenie z interfejsu jest odrzucane (ostrzeżenie w logu), a encja wraca do ostatniej wartości odebranej z PLC. Dla takich encji `source`, `initial_value`, `restore_value` i `require_value` są błędem konfiguracji. Po przekroczeniu `timeout` `number` przechodzi w stan „unknown” (NaN), a `switch` tylko wtedy, gdy wersja ESPHome ma `invalidate_state()`.
+
+## Zmienne tylko do wysyłki (`sensor` i `binary_sensor` w liście `write`)
+
+W liście `write` można użyć `entity: sensor` (zmienne liczbowe i typy czasowe) albo `entity: binary_sensor` (BOOL). Taka zmienna nie ma sterowania w interfejsie: encja jest tylko podglądem wartości, która jest wysyłana do PLC. Wartość pochodzi z:
+
+- opcji `source`: `id` innego sensora (dla `entity: sensor`) albo binary_sensora (dla `entity: binary_sensor`) zdefiniowanego w ESPHome. Każda publikacja stanu tej encji jest zapisywana do zmiennej i wysyłana zgodnie z `on_change` i `update_interval`. Stan źródła opublikowany przed uruchomieniem komponentu jest odczytywany przy starcie. Wartości NaN są pomijane,
+- `initial_value`: stałej wartości początkowej,
+- lambdy: `id(lista).set_variable_value("unique_id", wartość)`.
+
+```yaml
+sensor:
+  - platform: dallas_temp
+    id: czujnik_kotla
+    name: "Czujnik kotła"
+
+wago_netvar:
+  - id: plc_zapis
+    ip_address: "192.168.17.45"
+    list_id: 124
+    mode: write
+    on_change: true
+    update_interval: 30s
+    variables:
+      - name: "Temperatura kotła"
+        unique_id: temp_kotla
+        offset: 0
+        type: REAL
+        entity: sensor
+        source: czujnik_kotla          # id sensora ESPHome
+        unit_of_measurement: "°C"
+        device_class: temperature
+      - name: "Pompa włączona"
+        offset: 4
+        type: BOOL
+        entity: binary_sensor
+        source: pompa_pracuje          # id binary_sensora ESPHome
+```
+
+Zasady:
+
+- `source` dotyczy tylko `sensor` i `binary_sensor` w liście `write` (w liście `read` jest błędem). `number` i `switch` listy `write` sterujesz z interfejsu.
+- **Rodzaj źródła zależy od typu zmiennej:** liczby i typy czasowe ← `sensor` albo `number`; BOOL ← `binary_sensor` albo `switch`; STRING ← `text_sensor` (zmienna STRING w liście `write` z encją `sensor` tworzy w ESPHome `text_sensor`). Zwykłe `source: id` oznacza `sensor`, `binary_sensor` albo `text_sensor` (odpowiednio do typu); inny rodzaj podaje się jawnie, np. `source: {number: moj_number}` albo `source: {switch: moj_przelacznik}`. Nieprawidłowa kombinacja jest błędem konfiguracji.
+- Tekst STRING ze `source` jest ucinany do `length` (ostrzeżenie w logu).
+- Encja `sensor` w liście `write` pokazuje wartość zapisaną w buforze (po konwersji do typu zmiennej), więc zaokrągla ją zgodnie z typem. `zero_as_unavailable`, `filters`, `on_value` itd. działają jak zwykle.
+- `inverted: true` (dla `binary_sensor`) odwraca wartość pokazywaną przez encję względem wartości wysyłanej do PLC.
+- `require_value: true` (lista niepakowana) i `require_values` (lista pakowana) działają także dla tych zmiennych: do czasu pierwszej wartości zmienna uchodzi za pozbawioną wartości.
+- `restore_value` nie dotyczy `sensor` i `binary_sensor` (po restarcie wartość wraca ze `source`).
+
 ## Wartości początkowe i przywracanie
 
 Dotyczy list `write`. Każda zmienna sterowana encją `switch` lub `number` może mieć:
@@ -397,6 +480,8 @@ Konfiguracja listy i zmiennych (nazwy, domyślne wartości, reguły) jest taka s
 | Obszar | ESPHome | Home Assistant |
 |--------|---------|----------------|
 | Identyfikator listy | opcjonalne `id` (do lambd i akcji) | brak |
+| Źródło wartości zmiennej `sensor`/`binary_sensor` listy write (`source`) | `id` encji ESPHome (`sensor`, `number`, `binary_sensor`, `switch`, `text_sensor`; inny rodzaj jawnie: `{number: id}`) | identyfikator dowolnej encji Home Assistant, np. `sensor.temperatura_kotla`, `switch.pompa`, `input_number.nastawa` |
+| Polecenie z interfejsu do `switch`/`number` listy read | encja wraca do wartości z PLC (ostrzeżenie w logu) | błąd „należy do listy read” |
 | Dodatkowe parametry encji | cały schemat encji ESPHome (`filters`, `on_value`, `internal`, `web_server`, ...) | `visible_by_default`, `suggested_unit_of_measurement` |
 | Wysyłka na żądanie | akcja `wago_netvar.send` lub `send_now()` | usługa `wago_netvar.send_list` |
 | Przywracanie stanu | pamięć nieulotna ESPHome (klucz: `unique_id`) | `RestoreEntity` Home Assistant |
@@ -407,6 +492,10 @@ Konfiguracja listy i zmiennych (nazwy, domyślne wartości, reguły) jest taka s
 | Stan „niedostępny” po `timeout` | `unknown` (`binary_sensor`/`text_sensor`: o ile wersja ESPHome ma `invalidate_state()`) | `unavailable` |
 
 ## Zmiany
+
+- **Wszystkie rodzaje encji w obu rodzajach list:** `switch` i `number` są dozwolone w liście `read` (lustro wartości z PLC, polecenia z interfejsu odrzucane), a `sensor` i `binary_sensor` w liście `write`. `source` przyjmuje `sensor`, `number`, `binary_sensor`, `switch` i `text_sensor` (jawna forma `{rodzaj: id}`). STRING w liście `write` może być `sensor` ze `source` typu `text_sensor`; w liście `read` STRING wymaga `sensor`.
+
+- `sensor` i `binary_sensor` są dozwolone w liście `write` jako zmienne tylko do wysyłki, z opcją `source` (`id` sensora lub binary_sensora, którego stan jest wysyłany) oraz `initial_value`. Encje odświeżają się po każdej zmianie wartości zmiennej.
 
 - Ramki z typem wiadomości (bajty 4–7, w dokumentacji 3S pole „ID”) różnym od `0` są odrzucane i liczone w `rejected_packets`; opis pól 4–7 i 18–19 ujednolicono z dokumentacją protokołu.
 
