@@ -226,9 +226,20 @@ def migrate_legacy_keys(config):
         if CONF_ON_CHANGE in config:
             raise cv.Invalid("Use only 'on_change' ('send_on_change' is its alias)")
         config[CONF_ON_CHANGE] = config.pop(CONF_SEND_ON_CHANGE)
-    for key, unit in ((CONF_MIN_INTERVAL, "ms"), (CONF_UPDATE_INTERVAL, "s"), (CONF_TIMEOUT, "s")):
+    for key, unit in ((CONF_MIN_INTERVAL, "ms"), (CONF_TIMEOUT, "s")):
         if key in config:
             config[key] = time_value(unit)(config[key])
+    # update_interval: zero oznacza brak wysyłki cyklicznej. ESPHome nie akceptuje 0 ms (korekta do 1 ms z ostrzeżeniem,
+    # a w skrajnym przypadku zapętlenie), dlatego 0, "0s", "0ms" i "never" trafiają do niego jako "never".
+    if CONF_UPDATE_INTERVAL in config:
+        interval = config[CONF_UPDATE_INTERVAL]
+        if isinstance(interval, bool):
+            raise cv.Invalid("Expected a time period such as 500ms, 5s, 2min, or never")
+        if isinstance(interval, (int, float)):
+            interval = "never" if interval == 0 else f"{interval}s"
+        elif isinstance(interval, str) and re.fullmatch(r"\s*(never|0+(\.0+)?\s*(ms|s|min|h)?)\s*", interval.lower()):
+            interval = "never"
+        config[CONF_UPDATE_INTERVAL] = interval
     return config
 
 
@@ -800,7 +811,8 @@ async def to_code(config):
 SEND_ACTION_SCHEMA = automation.maybe_simple_id({cv.Required(CONF_ID): cv.use_id(WagoNetVarComponent)})
 
 
-@automation.register_action("wago_netvar.send", automation.LambdaAction, SEND_ACTION_SCHEMA)
+# synchronous=True: LambdaAction wykonuje lambdę i od razu przechodzi do następnej akcji (play_next_()).
+@automation.register_action("wago_netvar.send", automation.LambdaAction, SEND_ACTION_SCHEMA, synchronous=True)
 async def send_action_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
     lambda_ = await cg.process_lambda(Lambda(f"{parent}->send_now();"), args, return_type=cg.void)
