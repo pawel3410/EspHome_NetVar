@@ -72,6 +72,7 @@ CONF_ZERO_AS_UNAVAILABLE = "zero_as_unavailable"
 CONF_SUGGESTED_DISPLAY_PRECISION = "suggested_display_precision"  # w ESPHome: accuracy_decimals
 CONF_ENABLED_BY_DEFAULT = "enabled_by_default"  # w ESPHome: disabled_by_default (odwrotnie)
 CONF_INVERTED = "inverted"
+CONF_SOURCE = "source"  # sensor / binary_sensor listy write: encja, z której pochodzi wartość do wysyłki
 
 # Klucze wewnętrzne wyniku walidacji zmiennej
 CONF_VAR_NAME = "name"
@@ -146,8 +147,23 @@ NUMERIC_TYPES = set(TYPE_SIZES) - {"BOOL"}
 TEMPORAL_TYPES = {"TIME", "DATE", "TIME_OF_DAY", "DATE_AND_TIME"}
 
 ENTITY_KINDS = ("sensor", "binary_sensor", "switch", "number")
-READ_ENTITIES = ("sensor", "binary_sensor")
-WRITE_ENTITIES = ("switch", "number")
+# Każdy rodzaj encji działa w obu rodzajach list. Lista read: encja pokazuje wartość z PLC (switch i number są
+# tylko lustrem wartości, polecenia z interfejsu są odrzucane). Lista write: switch i number sterują wysyłaną
+# wartością, a sensor i binary_sensor są zmiennymi "tylko do wysyłki" (wartość z source, initial_value albo lambdy).
+READ_ENTITIES = ("sensor", "binary_sensor", "switch", "number")
+WRITE_ENTITIES = ("sensor", "binary_sensor", "switch", "number")
+
+# Encje, których stan może być źródłem (source) zmiennej listy write, oraz zgodność z typem zmiennej
+SOURCE_CLASSES = {
+    "sensor": sensor.Sensor,
+    "number": number.Number,
+    "binary_sensor": binary_sensor.BinarySensor,
+    "switch": switch.Switch,
+    "text_sensor": text_sensor.TextSensor,
+}
+SOURCE_KINDS_NUMERIC = ("sensor", "number")
+SOURCE_KINDS_BOOL = ("binary_sensor", "switch")
+SOURCE_KINDS_STRING = ("text_sensor",)
 
 _POLISH = str.maketrans("ąćęłńóśźżĄĆĘŁŃÓŚŹŻ", "acelnoszzACELNOSZZ")
 
@@ -351,6 +367,36 @@ def migrate_variable_keys(config):
     return config
 
 
+def validate_source(value, type_name, name):
+    """Źródło wartości zmiennej listy write: id encji ESPHome albo {rodzaj: id}.
+
+    Zwykłe id oznacza sensor (zmienne liczbowe), binary_sensor (BOOL) albo text_sensor (STRING). Inny rodzaj
+    encji podaje się jawnie, np. `source: {number: moj_number}` albo `source: {switch: moj_przelacznik}`.
+    Rodzaj źródła musi pasować do typu zmiennej: liczby <- sensor, number; BOOL <- binary_sensor, switch;
+    STRING <- text_sensor.
+    """
+    if type_name == "BOOL":
+        allowed, default = SOURCE_KINDS_BOOL, "binary_sensor"
+    elif is_string_type(type_name):
+        allowed, default = SOURCE_KINDS_STRING, "text_sensor"
+    else:
+        allowed, default = SOURCE_KINDS_NUMERIC, "sensor"
+
+    if isinstance(value, dict):
+        if len(value) != 1:
+            raise cv.Invalid(f"'source' of '{name}' must contain exactly one of: {', '.join(SOURCE_CLASSES)}")
+        (kind, reference), = value.items()
+        kind = cv.one_of(*SOURCE_CLASSES, lower=True)(kind)
+    else:
+        kind, reference = default, value
+
+    if kind not in allowed:
+        raise cv.Invalid(
+            f"'source' of '{name}' (type {type_name}) must be one of: {', '.join(allowed)}, not {kind}"
+        )
+    return {"kind": kind, "id": cv.use_id(SOURCE_CLASSES[kind])(reference)}
+
+
 def validate_variable(config):
     """Walidacja zmiennej z encją (konfiguracja jak w integracji HA).
 
@@ -430,16 +476,21 @@ def validate_variable(config):
         raise cv.Invalid(f"'zero_as_unavailable' applies only to numeric sensors ('{name}')")
 
     # initial_value / restore_value / min / max / step: tylko encje zapisu
+    # initial_value: encje zapisu (switch, number) oraz sensor i binary_sensor listy write; restore_value tylko
+    # switch i number. Zgodność z trybem listy (read/write) sprawdza validate_config.
     initial = _pop(remainder, CONF_INITIAL_VALUE)
-    if kind in ("switch", "number"):
-        if initial is not None:
-            initial = cv.boolean(initial) if kind == "switch" else cv.float_(initial)
-            result[CONF_INITIAL_VALUE] = initial
-    else:
-        if initial is not None or result[CONF_RESTORE_VALUE]:
-            raise cv.Invalid(f"initial_value and restore_value apply only to switch and number ('{name}')")
-        if result[CONF_REQUIRE_VALUE]:
-            raise cv.Invalid(f"require_value applies only to variables of write lists ('{name}')")
+    if initial is not None:
+        initial = cv.boolean(initial) if kind in ("switch", "binary_sensor") else cv.float_(initial)
+        result[CONF_INITIAL_VALUE] = initial
+    if result[CONF_RESTORE_VALUE] and kind not in ("switch", "number"):
+        raise cv.Invalid(f"restore_value applies only to switch and number ('{name}')")
+
+    # source: encja ESPHome (sensor albo binary_sensor), której stan jest wysyłany do PLC (tylko lista write)
+    source = _pop(remainder, CONF_SOURCE)
+    if source is not None:
+        if entity not in ("sensor", "binary_sensor"):
+            raise cv.Invalid(f"'source' applies only to sensor and binary_sensor variables ('{name}')")
+        result[CONF_SOURCE] = validate_source(source, type_name, name)
 
     if kind == "number":
         low, high = TYPE_RANGES.get(type_name, (None, None))
@@ -527,8 +578,19 @@ def validate_config(config):
             raise cv.Invalid(
                 f"A {mode} list can contain only entities: {', '.join(allowed)} (variable '{name}')"
             )
-        if is_string_type(variable[CONF_VAR_TYPE]) and variable[CONF_ENTITY] not in ("sensor", "number"):
-            raise cv.Invalid(f"STRING variable '{name}' must use entity sensor (read) or number (write)")
+        if is_string_type(variable[CONF_VAR_TYPE]):
+            if mode == "read" and variable[CONF_ENTITY] != "sensor":
+                raise cv.Invalid(f"STRING variable '{name}' in a read list must use entity sensor")
+            if mode == "write" and variable[CONF_ENTITY] not in ("sensor", "number"):
+                raise cv.Invalid(f"STRING variable '{name}' in a write list must use entity sensor or number")
+        if mode == "read":
+            # Encje listy read (także switch i number) tylko pokazują wartość z PLC.
+            for key in (CONF_SOURCE, CONF_INITIAL_VALUE):
+                if key in variable:
+                    raise cv.Invalid(f"'{key}' applies only to variables of write lists ('{name}')")
+            for key in (CONF_REQUIRE_VALUE, CONF_RESTORE_VALUE):
+                if variable[key]:
+                    raise cv.Invalid(f"{key} applies only to variables of write lists ('{name}')")
         if variable[CONF_REQUIRE_VALUE] and packed:
             raise cv.Invalid(
                 f"require_value ('{name}') applies only to unpacked lists; "
@@ -713,6 +775,15 @@ async def to_code(config):
                     float(initial or 0.0),
                 )
             )
+
+    # sensor i binary_sensor listy write: wartość początkowa i źródło (encja ESPHome)
+    for variable in config[CONF_VARIABLES]:
+        unique_id = variable[CONF_UNIQUE_ID]
+        if variable[CONF_KIND] in ("sensor", "text_sensor", "binary_sensor") and CONF_INITIAL_VALUE in variable:
+            cg.add(var.set_initial_value(unique_id, float(variable[CONF_INITIAL_VALUE])))
+        if CONF_SOURCE in variable:
+            source = await cg.get_variable(variable[CONF_SOURCE]["id"])
+            cg.add(getattr(var, f"set_source_{variable[CONF_SOURCE]['kind']}")(unique_id, source))
 
     stats = STATS_READ if config[CONF_MODE] == "read" else STATS_WRITE
     for key, setter in stats.items():
